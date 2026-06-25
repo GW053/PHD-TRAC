@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>记录与复盘</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">TODAY FLOW</p>
+          <h1>记录与复盘</h1>
+        </div>
+      </header>
+
+      <div class="date-row">
+        <div class="date-chip">
+          <button class="date-arrow" type="button" data-action="shift-date" data-days="-1" aria-label="前一天">‹</button>
+          <input id="global-date" type="date" />
+          <button class="date-arrow" type="button" data-action="shift-date" data-days="1" aria-label="后一天">›</button>
+        </div>
+        <button class="date-calendar-button" type="button" data-action="open-date-picker" aria-label="打开日历">▦</button>
+      </div>
+
+      <main id="app" class="app-main"></main>
+
+      <nav class="bottom-tabs" aria-label="主导航">
+        <button class="tab-button active" type="button" data-tab="record" aria-label="记录">
+          <span class="tab-icon" aria-hidden="true">◷</span>
+          <span>记录</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="execute" aria-label="执行">
+          <span class="tab-icon" aria-hidden="true">✓</span>
+          <span>执行</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="review" aria-label="复盘">
+          <span class="tab-icon" aria-hidden="true">◎</span>
+          <span>复盘</span>
+        </button>
+      </nav>
+    </div>
+
+    <template id="modal-template">
+      <div class="modal-backdrop" role="presentation">
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div class="modal-header">
+            <h2 id="modal-title"></h2>
+            <button class="icon-button" type="button" data-action="close-modal" aria-label="关闭">×</button>
+          </div>
+          <div id="modal-body" class="modal-body"></div>
+        </section>
+      </div>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>

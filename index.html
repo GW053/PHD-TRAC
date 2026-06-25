@@ -11,7 +11,10 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">TODAY FLOW</p>
-          <h1>记录与复盘</h1>
+          <div class="brand-line">
+            <h1>记录与复盘</h1>
+            <a class="version-link" href="#" data-action="open-version">v1.1</a>
+          </div>
         </div>
         <div class="top-actions">
           <button class="secondary-button backup-button" type="button" data-action="open-backup">备份</button>
@@ -24,10 +27,10 @@
         <div class="date-chip">
           <button class="date-arrow" type="button" data-action="shift-date" data-days="-1" aria-label="前一天">‹</button>
           <input id="global-date" type="date" />
+          <span id="weekday-label" class="weekday-label"></span>
           <button class="date-arrow" type="button" data-action="shift-date" data-days="1" aria-label="后一天">›</button>
         </div>
         <button class="date-calendar-button" type="button" data-action="open-date-picker" aria-label="打开日历">▦</button>
-        <span id="weekday-label" class="weekday-label"></span>
       </div>
 
       <main id="app" class="app-main"></main>

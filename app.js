@@ -4,8 +4,8 @@
   const SUPABASE_URL = "https://hgmpswhitmenyvnxotff.supabase.co";
   const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_WW3rmZCePegJsIf6LeqFvQ_KRgHD9pz";
   const SUPABASE_TABLE = "phd_trac_records";
-  const APP_VERSION = "v1.1";
-  const VERSION_UPDATED_AT = "2026-06-25";
+  const APP_VERSION = "v1.2";
+  const VERSION_UPDATED_AT = "2026-06-26";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -412,15 +412,15 @@
     const includeOther = owner === "review" ? ui.reviewSummaryIncludeOther : ui.recordSummaryIncludeOther;
     return `
       <div class="summary-controls">
-        <div class="summary-tabs">
-          <button class="toggle-button ${mode === "task" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="task">任务</button>
-          <button class="toggle-button ${mode === "location" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="location">地点</button>
-        </div>
         ${
           mode === "task"
             ? `<label class="summary-other-toggle"><input class="checkbox" type="checkbox" data-action="toggle-summary-other" data-owner="${owner}" ${includeOther ? "checked" : ""} />其他</label>`
             : ""
         }
+        <div class="summary-tabs">
+          <button class="toggle-button ${mode === "task" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="task">任务</button>
+          <button class="toggle-button ${mode === "location" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="location">地点</button>
+        </div>
       </div>
     `;
   }
@@ -735,7 +735,7 @@
       return `
         <article class="review-item compact-review-item" data-review-id="${review.id}">
           <div class="entry-display-line">
-            <strong>现象${index + 1}</strong>
+            <span class="review-label phenomenon-label"><i></i><strong>现象${index + 1}</strong></span>
             ${
               ui.reviewEditing
                 ? `<div class="row-actions">
@@ -774,9 +774,9 @@
   function renderReasonDisplay(reason, index) {
     return `
       <div class="review-reason">
-        <div class="entry-display-line muted-line"><strong>原因${index + 1}</strong></div>
+        <div class="entry-display-line muted-line"><span class="review-label reason-label"><i></i><strong>原因${index + 1}</strong></span></div>
         <p class="review-text">${reason.text ? escapeMultiline(reason.text) : "还没有写原因"}</p>
-        ${reason.measure ? `<div class="entry-display-line muted-line"><strong>措施</strong></div><p class="review-text">${escapeMultiline(reason.measure)}</p>` : ""}
+        ${reason.measure ? `<div class="entry-display-line muted-line"><span class="review-label measure-label"><i></i><strong>措施</strong></span></div><p class="review-text">${escapeMultiline(reason.measure)}</p>` : ""}
       </div>
     `;
   }
@@ -910,35 +910,66 @@
   }
 
   function openVersionModal() {
+    const versions = {
+      "v1.2": {
+        updatedAt: "2026-06-26",
+        items: [
+          "修复手机输入时因自动云同步重渲染导致的键盘断触。",
+          "新建/编辑目标弹窗强化母任务、二级任务、三级任务的层级样式。",
+          "目标进度逻辑说明调整：有子任务时按子任务/三级任务数量计算，不再计算母任务数量。",
+          "复盘展示优化：现象、原因、措施标签使用不同颜色文字和不同形状图标。",
+          "复盘长文本增加换行、间距和编辑框防遮挡保护。",
+          "汇总区“其他”勾选框移动到任务/地点切换按钮左侧。",
+        ],
+      },
+      "v1.1": {
+        updatedAt: "2026-06-25",
+        items: [
+          "顶部增加 v1.1 版本入口，并保留备份、登录入口；日期栏把周几收进日期框内。",
+          "登录改为自动云同步：登录后合并云端与本地数据，后续修改自动保存，并支持会话过期刷新。",
+          "云同步错误会显示 Supabase 返回的具体原因，并提示 payload 列、RLS、id 唯一约束等常见配置问题。",
+          "记录页整体压缩移动端间距，上午、下午、晚上保留右侧新增按钮，记录编辑按钮统一在总编辑后显示。",
+          "记录展示态在一级标签名前显示对应颜色圆点，方便快速识别分类。",
+          "记录页增加单条连续地点时间轴：绿色宿舍、蓝色工位、黄色户外；地点可配置多段到达/离开记录并可删除。",
+          "新增记录编辑顺序调整为一级/二级标签、时间、描述、保存/删除，删除按钮改为文字。",
+          "今日汇总、周/月汇总支持任务/地点两种扇形图；任务饼图可选择是否纳入“其他”。",
+          "时间汇总以日 24h、周 168h、月 720h 为基准，月汇总不再因 30/31 天跳变。",
+          "执行页增加日/周/月范围切换及对应时间切换；目标新增按钮常驻，编辑按钮与标题同行。",
+          "目标支持二级、三级任务分别填写数量和描述，三级任务数量会参与母任务进度条。",
+          "目标迁移改为单个母任务迁移，按钮只在大编辑模式下出现，并放在小编辑按钮左侧。",
+          "任务加减进度控件贴近对应任务右侧，进度条改为简洁绿色斜纹样式。",
+          "习惯追踪支持自定义颜色，颜色选择器改为小方块，并与今日完成度放在同一行。",
+          "习惯完成度圆点平滑变化，100% 显示实心花；展示态显示最近七天。",
+          "习惯追踪标题下显示最近七天日期范围，月历入口移动到习惯名左侧，编辑和移动按钮仅在总编辑后显示。",
+          "复盘页保留日/周/月各自时间切换，汇总数据移动到复盘框架上方。",
+          "复盘结构从“事情-原因”改为“现象-原因-措施”，现象和原因自动编号，措施为空时展示态隐藏。",
+          "上下移动按钮统一改为小三角，目标、习惯、记录、复盘、规划均支持编辑态排序。",
+        ],
+      },
+    };
+    const renderVersion = (version) => `
+      <div class="version-meta">
+        <strong>${version}</strong>
+        <span>更新时间：${versions[version].updatedAt}</span>
+      </div>
+      <div class="version-switch">
+        ${Object.keys(versions)
+          .map((item) => `<button class="toggle-button ${item === version ? "active" : ""}" type="button" data-modal-action="switch-version" data-version="${item}">${item}</button>`)
+          .join("")}
+      </div>
+      <ul class="version-list">
+        ${versions[version].items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    `;
     openModal(
       `版本信息 ${APP_VERSION}`,
-      `
-        <div class="version-meta">
-          <strong>${APP_VERSION}</strong>
-          <span>更新时间：${VERSION_UPDATED_AT}</span>
-        </div>
-        <ul class="version-list">
-          <li>顶部增加 v1.1 版本入口，并保留备份、登录入口；日期栏把周几收进日期框内。</li>
-          <li>登录改为自动云同步：登录后合并云端与本地数据，后续修改自动保存，并支持会话过期刷新。</li>
-          <li>云同步错误会显示 Supabase 返回的具体原因，并提示 payload 列、RLS、id 唯一约束等常见配置问题。</li>
-          <li>记录页整体压缩移动端间距，上午、下午、晚上保留右侧新增按钮，记录编辑按钮统一在总编辑后显示。</li>
-          <li>记录展示态在一级标签名前显示对应颜色圆点，方便快速识别分类。</li>
-          <li>记录页增加单条连续地点时间轴：绿色宿舍、蓝色工位、黄色户外；地点可配置多段到达/离开记录并可删除。</li>
-          <li>新增记录编辑顺序调整为一级/二级标签、时间、描述、保存/删除，删除按钮改为文字。</li>
-          <li>今日汇总、周/月汇总支持任务/地点两种扇形图；任务饼图可选择是否纳入“其他”。</li>
-          <li>时间汇总以日 24h、周 168h、月 720h 为基准，月汇总不再因 30/31 天跳变。</li>
-          <li>执行页增加日/周/月范围切换及对应时间切换；目标新增按钮常驻，编辑按钮与标题同行。</li>
-          <li>目标支持二级、三级任务分别填写数量和描述，三级任务数量会参与母任务进度条。</li>
-          <li>目标迁移改为单个母任务迁移，按钮只在大编辑模式下出现，并放在小编辑按钮左侧。</li>
-          <li>任务加减进度控件贴近对应任务右侧，进度条改为简洁绿色斜纹样式。</li>
-          <li>习惯追踪支持自定义颜色，颜色选择器改为小方块，并与今日完成度放在同一行。</li>
-          <li>习惯完成度圆点平滑变化，100% 显示实心花；展示态显示最近七天。</li>
-          <li>习惯追踪标题下显示最近七天日期范围，月历入口移动到习惯名左侧，编辑和移动按钮仅在总编辑后显示。</li>
-          <li>复盘页保留日/周/月各自时间切换，汇总数据移动到复盘框架上方。</li>
-          <li>复盘结构从“事情-原因”改为“现象-原因-措施”，现象和原因自动编号，措施为空时展示态隐藏。</li>
-          <li>上下移动按钮统一改为小三角，目标、习惯、记录、复盘、规划均支持编辑态排序。</li>
-        </ul>
-      `,
+      renderVersion(APP_VERSION),
+      (backdrop) => {
+        backdrop.addEventListener("click", (event) => {
+          if (event.target.dataset.modalAction !== "switch-version") return;
+          $("#modal-body", backdrop).innerHTML = renderVersion(event.target.dataset.version);
+        });
+      },
     );
   }
 
@@ -1057,12 +1088,10 @@
     syncMeta.message = "等待自动同步";
     remoteSaveTimer = setTimeout(() => {
       saveRemoteNow()
-        .then(render)
         .catch((error) => {
           console.warn(error);
           syncMeta.status = "error";
           syncMeta.message = error.message || "自动同步失败";
-          render();
         });
     }, 900);
   }
@@ -1385,29 +1414,35 @@
     openModal(
       isEdit ? "编辑目标" : "新增目标",
       `
-        <label class="form-row">
-          <span class="field-label">母任务</span>
-          <input id="target-name" value="${escapeAttr(existingTarget?.name || "")}" placeholder="例如：完成文献阅读" />
-        </label>
-        <label class="form-row">
-          <span class="field-label">母任务描述</span>
-          <input id="target-description" value="${escapeAttr(existingTarget?.description || "")}" placeholder="可选，一句话描述" />
-        </label>
-        <div class="compact-form-row">
-          <label class="check-inline">
-            <input id="target-progress" class="checkbox" type="checkbox" ${existingTarget?.hasProgress !== false ? "checked" : ""} />
-            进度条
+        <section class="parent-task-editor">
+          <div class="target-editor-heading">
+            <strong>母任务</strong>
+            <span>顶层目标</span>
+          </div>
+          <label class="form-row">
+            <span class="field-label">名称</span>
+            <input id="target-name" value="${escapeAttr(existingTarget?.name || "")}" placeholder="例如：完成文献阅读" />
           </label>
           <label class="form-row">
-            <span class="field-label">母任务数量</span>
-            <input id="target-total" type="number" min="1" step="1" value="${existingTarget?.total || 1}" />
+            <span class="field-label">描述</span>
+            <input id="target-description" value="${escapeAttr(existingTarget?.description || "")}" placeholder="可选，一句话描述" />
           </label>
-        </div>
+          <div class="compact-form-row">
+            <label class="check-inline">
+              <input id="target-progress" class="checkbox" type="checkbox" ${existingTarget?.hasProgress !== false ? "checked" : ""} />
+              进度条
+            </label>
+            <label class="form-row">
+              <span class="field-label">数量（无子任务时计入）</span>
+              <input id="target-total" type="number" min="1" step="1" value="${existingTarget?.total || 1}" />
+            </label>
+          </div>
+        </section>
         ${isEdit ? `<button class="icon-button danger-icon modal-delete" type="button" data-modal-action="delete-target-modal" aria-label="删除目标">×</button>` : ""}
-        <div class="section-title">
+        <div class="section-title child-editor-title">
           <div>
             <h2>子任务</h2>
-            <p class="hint">二级、三级任务都可以分别填写数量和一句话描述，数量会计入进度条。</p>
+            <p class="hint">有子任务时，进度按二级/三级任务数量计算，不再计算母任务数量。</p>
           </div>
           <button class="secondary-button add-button" type="button" data-modal-action="add-child-row" aria-label="新增子任务">+</button>
         </div>
@@ -1461,12 +1496,16 @@
 
   function renderChildEditor(child = null) {
     return `
-      <section class="tag-card" data-child-row data-child-id="${child?.id || ""}">
+      <section class="tag-card child-task-card" data-child-row data-child-id="${child?.id || ""}">
+        <div class="target-editor-heading child-heading">
+          <strong>二级任务</strong>
+          <span>子任务</span>
+        </div>
         <div class="grid-2">
-          <label class="form-row"><span class="field-label">二级任务</span><input data-child-field="name" value="${escapeAttr(child?.name || "")}" placeholder="例如：读完第一篇" /></label>
+          <label class="form-row"><span class="field-label">名称</span><input data-child-field="name" value="${escapeAttr(child?.name || "")}" placeholder="例如：读完第一篇" /></label>
           <label class="form-row"><span class="field-label">数量</span><input data-child-field="total" type="number" min="1" step="1" value="${child?.total || 1}" /></label>
         </div>
-        <label class="form-row"><span class="field-label">二级任务描述</span><input data-child-field="description" value="${escapeAttr(child?.description || "")}" placeholder="可选，一句话描述" /></label>
+        <label class="form-row"><span class="field-label">描述</span><input data-child-field="description" value="${escapeAttr(child?.description || "")}" placeholder="可选，一句话描述" /></label>
         <div class="grandchild-editor-wrap">
           <div class="section-title mini-title">
             <div>

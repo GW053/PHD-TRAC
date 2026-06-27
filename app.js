@@ -4,8 +4,8 @@
   const SUPABASE_URL = "https://hgmpswhitmenyvnxotff.supabase.co";
   const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_WW3rmZCePegJsIf6LeqFvQ_KRgHD9pz";
   const SUPABASE_TABLE = "phd_trac_records";
-  const APP_VERSION = "v1.2";
-  const VERSION_UPDATED_AT = "2026-06-26";
+  const APP_VERSION = "v1.3";
+  const VERSION_UPDATED_AT = "2026-06-27";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -24,6 +24,11 @@
     activeTab: "record",
     targetScope: "day",
     reviewScope: "day",
+    reviewDates: {
+      day: todayIso(),
+      week: todayIso(),
+      month: todayIso(),
+    },
     settings: {
       segments: [
         { id: "morning", name: "上午", start: "06:00", end: "12:00" },
@@ -36,18 +41,16 @@
         { id: "entertainment", name: "娱乐", color: "#b35d4a", subtags: ["联络", "游戏", "刷社媒"] },
       ],
       plans: ["提升文献阅读能力", "锻炼英语口语能力", "基础知识复习"],
-      locations: {
-        work: [{ id: "work-default", arrive: "09:00", leave: "18:00" }],
-        dorm: [{ id: "dorm-default", arrive: "22:30", leave: "06:00" }],
-      },
+      locations: { work: [], dorm: [] },
     },
     logs: {},
+    locationLogs: {},
     targets: {},
     habits: [],
     reviews: {},
   };
 
-  let state = loadState();
+  let state = normalizeStateShape(loadState());
   let session = loadSession();
   let remoteSaveTimer = null;
   let modalCleanup = null;
@@ -59,16 +62,19 @@
   const ui = {
     editingLogs: new Set(),
     logDrafts: new Map(),
+    editingLocations: new Set(),
+    locationDrafts: new Map(),
     editingReviews: new Set(),
     recordEditing: false,
     targetEditing: false,
     habitEditing: false,
     reviewEditing: false,
     plansEditing: false,
+    recordSummaryScope: "day",
     recordSummaryMode: "task",
     reviewSummaryMode: "task",
-    recordSummaryIncludeOther: true,
-    reviewSummaryIncludeOther: true,
+    recordSummaryIncludeOther: false,
+    reviewSummaryIncludeOther: false,
   };
 
   function loadState() {
@@ -81,6 +87,27 @@
       console.warn(error);
       return structuredClone(defaults);
     }
+  }
+
+  function normalizeStateShape(nextState) {
+    const normalized = mergeDefaults(structuredClone(defaults), nextState || {});
+    normalized.targetScope = "day";
+    normalized.reviewDates = {
+      day: normalized.reviewDates?.day || normalized.date || todayIso(),
+      week: normalized.reviewDates?.week || normalized.date || todayIso(),
+      month: normalized.reviewDates?.month || normalized.date || todayIso(),
+    };
+    normalized.locationLogs ||= {};
+    const legacyLocations = normalizeLocations(normalized.settings?.locations || {});
+    const hasLocationLogs = Object.values(normalized.locationLogs).some((records) => {
+      const daily = normalizeLocations(records);
+      return daily.work.length || daily.dorm.length;
+    });
+    if (!hasLocationLogs && (legacyLocations.work.length || legacyLocations.dorm.length)) {
+      normalized.locationLogs[normalized.date || todayIso()] = legacyLocations;
+    }
+    normalized.settings.locations = { work: [], dorm: [] };
+    return normalized;
   }
 
   function loadSession() {
@@ -113,27 +140,29 @@
   }
 
   function mergeCloudState(localState, remoteState) {
-    const remote = mergeDefaults(structuredClone(defaults), remoteState);
-    const local = mergeDefaults(structuredClone(defaults), localState);
-    return {
+    const remote = normalizeStateShape(remoteState);
+    const local = normalizeStateShape(localState);
+    return normalizeStateShape({
       ...remote,
       date: local.date,
       activeTab: local.activeTab,
-      targetScope: local.targetScope,
+      targetScope: "day",
       reviewScope: local.reviewScope,
+      reviewDates: { ...remote.reviewDates, ...local.reviewDates },
       settings: {
         ...remote.settings,
         ...local.settings,
         segments: mergeById(remote.settings.segments || [], local.settings.segments || []),
         tags: mergeById(remote.settings.tags || [], local.settings.tags || []),
         plans: mergeTextList(remote.settings.plans || [], local.settings.plans || []),
-        locations: mergeLocations(remote.settings.locations, local.settings.locations),
+        locations: { work: [], dorm: [] },
       },
       logs: mergeDateCollections(remote.logs || {}, local.logs || {}),
+      locationLogs: mergeLocationLogs(remote.locationLogs || {}, local.locationLogs || {}),
       targets: mergeScopedCollections(remote.targets || {}, local.targets || {}),
       habits: mergeHabits(remote.habits || [], local.habits || []),
       reviews: mergeScopedCollections(remote.reviews || {}, local.reviews || {}),
-    };
+    });
   }
 
   function mergeById(remoteItems, localItems) {
@@ -185,6 +214,23 @@
     };
   }
 
+  function mergeLocationLogs(remoteCollections, localCollections) {
+    const result = { ...remoteCollections };
+    for (const [date, records] of Object.entries(localCollections || {})) {
+      result[date] = mergeLocationRecords(result[date] || {}, records || {});
+    }
+    return result;
+  }
+
+  function mergeLocationRecords(remoteLocations, localLocations) {
+    const remote = normalizeLocationRecords(remoteLocations);
+    const local = normalizeLocationRecords(localLocations);
+    return {
+      work: mergeById(remote.work, local.work),
+      dorm: mergeById(remote.dorm, local.dorm),
+    };
+  }
+
   function saveState(options = {}) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     if (options.remote !== false) queueRemoteSave();
@@ -227,6 +273,12 @@
     return state.logs[date];
   }
 
+  function locationRecordsForDate(date = dateKey()) {
+    state.locationLogs ||= {};
+    state.locationLogs[date] = normalizeLocationRecords(state.locationLogs[date] || {});
+    return state.locationLogs[date];
+  }
+
   function targetsForCurrentScope() {
     state.targets[state.targetScope] ||= {};
     const key = scopeKey(state.targetScope);
@@ -235,18 +287,31 @@
   }
 
   function reviewsForCurrentScope() {
-    state.reviews[state.reviewScope] ||= {};
-    const key = scopeKey(state.reviewScope);
-    state.reviews[state.reviewScope][key] ||= [];
-    state.reviews[state.reviewScope][key] = state.reviews[state.reviewScope][key].map(normalizeReviewItem);
-    return state.reviews[state.reviewScope][key];
+    return reviewsForScope(state.reviewScope, reviewDate(state.reviewScope));
+  }
+
+  function reviewsForScope(scope, date = reviewDate(scope)) {
+    state.reviews[scope] ||= {};
+    const key = scopeKey(scope, date);
+    state.reviews[scope][key] ||= [];
+    state.reviews[scope][key] = state.reviews[scope][key].map(normalizeReviewItem);
+    return state.reviews[scope][key];
+  }
+
+  function reviewDate(scope) {
+    state.reviewDates ||= {};
+    state.reviewDates[scope] ||= dateKey();
+    return state.reviewDates[scope];
   }
 
   function render() {
-    $("#global-date").value = dateKey();
-    $(".date-row")?.classList.toggle("hidden", state.activeTab !== "record");
-    const weekdayLabel = $("#weekday-label");
-    if (weekdayLabel) weekdayLabel.textContent = weekdayText(dateKey());
+    const globalDate = $("#global-date");
+    const globalDatePicker = $("#global-date-picker");
+    if (globalDate) globalDate.value = dateKey();
+    if (globalDatePicker) globalDatePicker.value = dateKey();
+    $(".date-row")?.classList.toggle("hidden", state.activeTab === "review");
+    const topCurrentDate = $("#top-current-date");
+    if (topCurrentDate) topCurrentDate.textContent = `${dateKey()} ${weekdayText(dateKey())}`;
     const loginButton = $("#login-button");
     if (loginButton) loginButton.textContent = session ? (syncMeta.status === "saving" ? "同步中" : "已登录") : "登录";
     $$(".tab-button").forEach((button) => {
@@ -259,6 +324,7 @@
 
   function renderRecord() {
     const logs = logsForDate();
+    const locations = locationRecordsForDate();
     $("#app").innerHTML = `
       <section class="view" data-view="record">
         <div class="section-band">
@@ -268,26 +334,32 @@
               <p class="hint">按上午、下午、晚上记录事项，可调整时间段，也可维护默认标签。</p>
             </div>
             <div class="button-row">
-              ${ui.recordEditing ? `<button class="secondary-button" type="button" data-action="edit-segments">时段</button><button class="secondary-button" type="button" data-action="edit-locations">地点</button><button class="secondary-button" type="button" data-action="edit-tags">标签</button>` : ""}
+              ${ui.recordEditing ? `<button class="secondary-button" type="button" data-action="edit-segments">时段</button><button class="secondary-button" type="button" data-action="edit-tags">标签</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-record-edit">${ui.recordEditing ? "完成" : "编辑"}</button>
             </div>
           </div>
         </div>
-        <div class="record-with-axis">
-          ${renderDayAxis()}
-          <div class="record-timeline-list">
-            ${state.settings.segments.map((segment) => renderSegment(segment, logs)).join("")}
+        <div class="record-layout">
+          ${renderLocationPanel(locations)}
+          <div class="record-with-axis">
+            ${renderDayAxis()}
+            <div class="record-timeline-list">
+              ${state.settings.segments.map((segment) => renderSegment(segment, logs)).join("")}
+            </div>
           </div>
         </div>
         <section class="section-band today-summary">
           <div class="section-title compact-title">
             <div>
-              <h2>今日汇总</h2>
-              <p class="hint">已记录 ${formatDuration(sumMinutes(Object.values(getTotals(logs))))} / 24h</p>
+              <div class="summary-heading-line">
+                <h2>${summaryScopeTitle(ui.recordSummaryScope)}</h2>
+                ${renderRecordSummaryScopeSwitch()}
+              </div>
+              <p class="hint">${recordSummaryHint(ui.recordSummaryScope)}</p>
             </div>
             ${renderSummaryToggle("record", ui.recordSummaryMode)}
           </div>
-          ${renderSummaryContent("record")}
+          ${renderRecordSummaries()}
         </section>
       </section>
     `;
@@ -331,6 +403,72 @@
           ${[...segmentLogs.map((entry) => renderLogEntry(entry, false)), ...draftLogs.map((entry) => renderLogEntry(entry, true))].join("") || `<p class="empty compact-empty">还没有记录，点右上角 +。</p>`}
         </div>
       </section>
+    `;
+  }
+
+  function renderLocationPanel(locations) {
+    const entries = locationEntriesForDate(dateKey(), locations);
+    const drafts = [...ui.locationDrafts.values()].filter((entry) => entry.date === dateKey());
+    return `
+      <section class="segment-panel location-panel">
+        <div class="segment-header">
+          <div class="segment-title-line">
+            <h2>地点时间</h2>
+            <span class="segment-time">宿舍 / 工位 / 户外</span>
+          </div>
+          <button class="icon-button" type="button" data-action="add-location" aria-label="新增地点时间">+</button>
+        </div>
+        <div class="entries">
+          ${[...entries.map((entry) => renderLocationEntry(entry, false)), ...drafts.map((entry) => renderLocationEntry(entry, true))].join("") || `<p class="empty compact-empty">还没有地点时间记录，点右上角 +。</p>`}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderLocationEntry(entry, isDraft = false) {
+    const draft = ui.locationDrafts.get(entry.id);
+    const visibleEntry = draft || entry;
+    const isEditing = isDraft || ui.editingLocations.has(entry.id);
+    if (!isEditing) {
+      return `
+        <article class="entry compact-entry location-entry" data-location-id="${entry.id}" data-location-type="${entry.type}">
+          <div class="entry-display-line">
+            <div class="entry-title-actions">
+              <strong class="entry-tag-title">
+                <i class="color-dot location-dot" style="background:${locationColor(visibleEntry.type)}"></i>
+                <span>${locationLabel(visibleEntry.type)}</span>
+              </strong>
+              ${
+                ui.recordEditing
+                  ? `<div class="row-actions">
+                      <button class="ghost-button compact-action" type="button" data-action="edit-location">编辑</button>
+                    </div>`
+                  : ""
+              }
+            </div>
+            <span class="entry-duration">${formatLocationRange(visibleEntry)}</span>
+          </div>
+        </article>
+      `;
+    }
+    return `
+      <article class="entry editing-entry location-editing" data-location-id="${entry.id}" data-draft="${isDraft ? "true" : "false"}">
+        <div class="entry-edit-grid">
+          <select data-action="update-location" data-field="type" aria-label="地点类型">
+            <option value="" ${!visibleEntry.type ? "selected" : ""}>无</option>
+            <option value="work" ${visibleEntry.type === "work" ? "selected" : ""}>工位</option>
+            <option value="dorm" ${visibleEntry.type === "dorm" ? "selected" : ""}>宿舍</option>
+          </select>
+          <div class="grid-2 tight-grid">
+            <input data-action="update-location" data-field="start" type="time" value="${visibleEntry.start || ""}" aria-label="开始时间" />
+            <input data-action="update-location" data-field="end" type="time" value="${visibleEntry.end || ""}" aria-label="结束时间" />
+          </div>
+        </div>
+        <div class="log-edit-buttons">
+          <button class="secondary-button" type="button" data-action="save-location">保存</button>
+          ${(ui.recordEditing || isDraft) ? `<button class="danger-button" type="button" data-action="delete-location">删除</button>` : ""}
+        </div>
+      </article>
     `;
   }
 
@@ -425,16 +563,45 @@
     `;
   }
 
-  function renderSummaryContent(owner) {
-    const scope = owner === "review" ? state.reviewScope : "day";
+  function renderSummaryContent(owner, scopeOverride = null, dateOverride = dateKey()) {
+    const scope = scopeOverride || (owner === "review" ? state.reviewScope : "day");
     const mode = owner === "review" ? ui.reviewSummaryMode : ui.recordSummaryMode;
     const includeOther = owner === "review" ? ui.reviewSummaryIncludeOther : ui.recordSummaryIncludeOther;
-    const totals = mode === "location" ? locationTotalsForScope(scope) : owner === "review" ? totalsForReviewScope() : getTotals(logsForDate());
+    const totals = mode === "location" ? locationTotalsForScope(scope, dateOverride) : totalsForLogScope(scope, dateOverride);
     const baseline = mode === "location" || includeOther ? minutesInScope(scope) : null;
     return `
       <div class="data-summary compact-summary">
         ${renderPie(totals, baseline)}
         <div class="stat-list">${renderStatRows(totals, baseline)}</div>
+      </div>
+    `;
+  }
+
+  function renderRecordSummaries() {
+    const scope = ui.recordSummaryScope;
+    return `
+      <section class="summary-scope-card active-summary-scope">
+        <div class="summary-scope-title">
+          <h3>${summaryScopeTitle(scope)}</h3>
+          <span>${escapeHtml(scopeDisplay(scope, dateKey()))}</span>
+        </div>
+        ${renderSummaryContent("record", scope, dateKey())}
+        <div class="stat-list habit-rate-row">
+          <div class="stat-row">
+            <span>习惯平均达标率</span>
+            <strong>${habitRateForScope(scope, dateKey())}%</strong>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRecordSummaryScopeSwitch() {
+    return `
+      <div class="summary-scope-tabs">
+        ${["day", "week", "month"]
+          .map((scope) => `<button class="toggle-button ${ui.recordSummaryScope === scope ? "active" : ""}" type="button" data-action="set-record-summary-scope" data-scope="${scope}">${summaryScopeShortLabel(scope)}</button>`)
+          .join("")}
       </div>
     `;
   }
@@ -460,29 +627,15 @@
   }
 
   function renderExecute() {
+    state.targetScope = "day";
     const targets = targetsForCurrentScope();
     const sortedTargets = [...targets].sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)));
     $("#app").innerHTML = `
       <section class="view" data-view="execute">
-        <div class="section-band">
-          <div class="section-title scope-header">
-            <div>
-              <h2>执行</h2>
-              <p class="hint">切换日期和目标范围，拆分任务，按数量更新进度。</p>
-            </div>
-            <div class="button-row">
-              <div class="target-tabs">
-              ${["day", "week", "month"].map((scope) => `<button class="toggle-button ${state.targetScope === scope ? "active" : ""}" type="button" data-action="set-target-scope" data-scope="${scope}">${scopeLabel(scope)}</button>`).join("")}
-              </div>
-            </div>
-          </div>
-          ${renderScopeNavigator(state.targetScope, "target")}
-        </div>
-
         <section class="section-band">
           <div class="section-title">
             <div>
-              <h2>${prettyScope(state.targetScope)}目标</h2>
+              <h2>目标</h2>
               <p class="hint">${scopeDisplay(state.targetScope)}</p>
             </div>
             <div class="button-row">
@@ -517,13 +670,14 @@
   function renderTarget(target) {
     const progress = targetProgress(target);
     const done = isTaskDone(target);
+    const collapsed = target.collapsed !== false;
     return `
       <article class="task-group ${done ? "done" : ""}" data-target-id="${target.id}">
         <div class="task-header">
           <div class="task-title-wrap">
             <div class="task-title-line">
               <h3 class="task-title">
-                <button class="icon-button" type="button" data-action="toggle-target" aria-label="展开或收起">${target.collapsed ? "▸" : "▾"}</button>
+                <button class="icon-button" type="button" data-action="toggle-target" aria-label="展开或收起">${collapsed ? "▸" : "▾"}</button>
                 <span>${escapeHtml(target.name)}</span>
               </h3>
               ${
@@ -537,6 +691,7 @@
                   : ""
               }
             </div>
+            <p class="task-age">执行了 ${executionDays(target)} 天</p>
             ${target.description ? `<p class="task-description">${escapeMultiline(target.description)}</p>` : ""}
             ${target.hasProgress ? renderProgress(progress) : `<p class="task-meta">未开启进度条</p>`}
           </div>
@@ -544,7 +699,7 @@
             ${target.hasProgress && !target.children?.length ? renderStepper(target.id, "", target.done || 0, target.total || 1) : ""}
           </div>
         </div>
-        ${target.collapsed ? "" : renderSubtasks(target)}
+        ${collapsed ? "" : renderSubtasks(target)}
       </article>
     `;
   }
@@ -601,10 +756,16 @@
   }
 
   function renderScopeNavigator(scope, owner) {
+    const date = dateKey();
     return `
-      <div class="scope-navigator" data-scope-owner="${owner}">
+      <div class="date-switch-panel scope-navigator" data-scope-owner="${owner}">
+        <span class="date-label">${scopeSwitchLabel(scope)}</span>
         <button class="date-arrow" type="button" data-action="shift-scope-date" data-owner="${owner}" data-direction="-1" aria-label="上一个">‹</button>
-        <span>${escapeHtml(scopeDisplay(scope))}</span>
+        <span class="date-display-field">${escapeHtml(scopeDisplay(scope, date))}</span>
+        <label class="date-calendar-button" aria-label="选择时间">
+          <span aria-hidden="true">▦</span>
+          <input type="${scopePickerType(scope)}" value="${escapeAttr(scopePickerValue(scope, date))}" data-action="set-scope-date" data-owner="${owner}" data-scope="${scope}" />
+        </label>
         <button class="date-arrow" type="button" data-action="shift-scope-date" data-owner="${owner}" data-direction="1" aria-label="下一个">›</button>
       </div>
     `;
@@ -637,75 +798,49 @@
   }
 
   function renderReview() {
-    const reviewItems = reviewsForCurrentScope();
-    const totals = totalsForReviewScope();
-    const habitRate = habitRateForScope();
     $("#app").innerHTML = `
       <section class="view" data-view="review">
-        <div class="section-band">
-          <div class="review-header">
-            <div>
-              <h2>复盘</h2>
-              <p class="hint">按日、周、月记录现象、原因和措施。</p>
-            </div>
-            <div class="button-row">
-              <div class="review-tabs">
-              ${["day", "week", "month"].map((scope) => `<button class="toggle-button ${state.reviewScope === scope ? "active" : ""}" type="button" data-action="set-review-scope" data-scope="${scope}">${reviewLabel(scope)}</button>`).join("")}
-              </div>
-            </div>
-          </div>
-          ${renderScopeNavigator(state.reviewScope, "review")}
-        </div>
-
-        <section class="section-band">
-          <div class="section-title">
-            <div>
-              <h2>长期规划</h2>
-              <p class="hint">可以维护持续关注的能力和方向。</p>
-            </div>
-            <div class="button-row">
-              <button class="secondary-button add-button" type="button" data-action="add-plan" aria-label="新增规划">+</button>
-              <button class="primary-button" type="button" data-action="toggle-plan-edit">${ui.plansEditing ? "完成" : "编辑"}</button>
-            </div>
-          </div>
-          <div class="plans-list">
-            ${state.settings.plans.map((plan, index) => renderPlan(plan, index)).join("")}
-          </div>
-        </section>
-
-        <section class="section-band">
-          <div class="section-title">
-            <div>
-              <h2>${reviewLabel(state.reviewScope)}汇总数据</h2>
-              <p class="hint">时间分配和习惯达标率随所选范围变化。</p>
-            </div>
-            ${renderSummaryToggle("review", ui.reviewSummaryMode)}
-          </div>
-          ${renderSummaryContent("review")}
-          <div class="stat-list habit-rate-row">
-            <div class="stat-row">
-              <span>习惯平均达标率</span>
-              <strong>${habitRate}%</strong>
-            </div>
-          </div>
-        </section>
-
-        <section class="section-band">
-          <div class="section-title">
-            <div>
-              <h2>${reviewLabel(state.reviewScope)}框架</h2>
-              <p class="hint">一件事，对应一个现象和一个原因。</p>
-            </div>
-            <div class="button-row">
-              <button class="secondary-button add-button" type="button" data-action="add-review-item" aria-label="新增现象">+</button>
-              <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
-            </div>
-          </div>
-          <div class="review-stack">
-            ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index)).join("") : `<p class="empty">还没有复盘事项。</p>`}
-          </div>
-        </section>
+        ${["day", "week", "month"].map(renderReviewScopeSection).join("")}
       </section>
+    `;
+  }
+
+  function renderReviewScopeSection(scope) {
+    const date = reviewDate(scope);
+    const reviewItems = reviewsForScope(scope, date);
+    return `
+      <section class="section-band review-scope-section" data-review-scope="${scope}">
+        ${renderReviewNavigator(scope)}
+        <div class="section-title">
+          <div>
+            <h2>${reviewLabel(scope)}</h2>
+            <p class="hint">${scopeDisplay(scope, date)}</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary-button add-button" type="button" data-action="add-review-item" data-review-scope="${scope}" aria-label="新增现象">+</button>
+            <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
+          </div>
+        </div>
+        <div class="review-stack">
+          ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, scope)).join("") : `<p class="empty">还没有复盘事项。</p>`}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderReviewNavigator(scope) {
+    const date = reviewDate(scope);
+    return `
+      <div class="date-switch-panel scope-navigator review-scope-navigator">
+        <span class="date-label">${scopeSwitchLabel(scope)}</span>
+        <button class="date-arrow" type="button" data-action="shift-review-date" data-review-scope="${scope}" data-direction="-1" aria-label="上一个">‹</button>
+        <span class="date-display-field">${escapeHtml(scopeDisplay(scope, date))}</span>
+        <label class="date-calendar-button" aria-label="选择时间">
+          <span aria-hidden="true">▦</span>
+          <input type="${scopePickerType(scope)}" value="${escapeAttr(scopePickerValue(scope, date))}" data-action="set-review-scope-date" data-review-scope="${scope}" />
+        </label>
+        <button class="date-arrow" type="button" data-action="shift-review-date" data-review-scope="${scope}" data-direction="1" aria-label="下一个">›</button>
+      </div>
     `;
   }
 
@@ -727,13 +862,13 @@
     `;
   }
 
-  function renderReviewItem(item, index) {
+  function renderReviewItem(item, index, scope = state.reviewScope) {
     const review = normalizeReviewItem(item);
     const isEditing = ui.editingReviews.has(item.id);
-    const placeholders = reviewPlaceholders(state.reviewScope);
+    const placeholders = reviewPlaceholders(scope);
     if (!isEditing) {
       return `
-        <article class="review-item compact-review-item" data-review-id="${review.id}">
+        <article class="review-item compact-review-item" data-review-id="${review.id}" data-review-scope="${scope}">
           <div class="entry-display-line">
             <span class="review-label phenomenon-label"><i></i><strong>现象${index + 1}</strong></span>
             ${
@@ -754,7 +889,7 @@
       `;
     }
     return `
-      <article class="review-item editing-review-item" data-review-id="${review.id}">
+      <article class="review-item editing-review-item" data-review-id="${review.id}" data-review-scope="${scope}">
         <label class="form-row">
           <span class="field-label">现象${index + 1}</span>
           <textarea rows="${textareaRows(review.phenomenon)}" data-action="update-review-item" data-field="phenomenon" placeholder="${placeholders.phenomenon}">${escapeHtml(review.phenomenon || "")}</textarea>
@@ -899,9 +1034,9 @@
   function importBackup(text) {
     try {
       const parsed = JSON.parse(text);
-      state = mergeDefaults(structuredClone(defaults), parsed);
+      state = normalizeStateShape(parsed);
       saveState();
-      clearLogDrafts();
+      clearRecordDrafts();
       closeModal();
       render();
     } catch (error) {
@@ -911,65 +1046,64 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.3": {
+        updatedAt: "2026-06-27",
+        items: [
+          "新增全局顶部栏：应用图标、标题、轻量版本链接和当前日期统一展示。",
+          "日期切换栏改为独立浅色面板，支持左右切换、手动输入和系统日历选择。",
+          "所有弹窗改为屏幕居中显示，版本信息弹窗直接展示完整版本记录。",
+          "地点时间改为按日期保存，新增、删除和统计只影响当前日期，并兼容旧地点设置。",
+          "记录页整合今日、本周、本月汇总，支持任务/地点扇形图和“其他”勾选。",
+          "目标页保留日目标逻辑，默认收起子任务，并显示目标执行天数。",
+          "目标进度按最低层任务统计，避免母任务、二级任务和三级任务重复计数。",
+          "目标编辑改为点状树结构，二级和三级任务支持等宽新增/删除操作行。",
+          "复盘页改为日、周、月三段纵向展示，各自拥有独立时间切换栏。",
+        ],
+      },
       "v1.2": {
         updatedAt: "2026-06-26",
         items: [
-          "修复手机输入时因自动云同步重渲染导致的键盘断触。",
-          "新建/编辑目标弹窗强化母任务、二级任务、三级任务的层级样式。",
-          "目标进度逻辑说明调整：有子任务时按子任务/三级任务数量计算，不再计算母任务数量。",
-          "复盘展示优化：现象、原因、措施标签使用不同颜色文字和不同形状图标。",
-          "复盘长文本增加换行、间距和编辑框防遮挡保护。",
-          "汇总区“其他”勾选框移动到任务/地点切换按钮左侧。",
+          "修复手机输入时因自动同步触发重渲染导致的键盘断触。",
+          "优化目标编辑层级，母任务、二级任务和三级任务的字号与层级更清晰。",
+          "优化目标进度规则，有子任务时按子任务数量计算，不再计入母任务数量。",
+          "优化复盘展示，现象、原因、措施使用不同颜色文字和形状图标。",
+          "修复复盘长文本与措施输入框互相遮挡的问题。",
+          "优化汇总区，把“其他”勾选放到任务/地点切换左侧。",
         ],
       },
       "v1.1": {
         updatedAt: "2026-06-25",
         items: [
-          "顶部增加 v1.1 版本入口，并保留备份、登录入口；日期栏把周几收进日期框内。",
-          "登录改为自动云同步：登录后合并云端与本地数据，后续修改自动保存，并支持会话过期刷新。",
-          "云同步错误会显示 Supabase 返回的具体原因，并提示 payload 列、RLS、id 唯一约束等常见配置问题。",
-          "记录页整体压缩移动端间距，上午、下午、晚上保留右侧新增按钮，记录编辑按钮统一在总编辑后显示。",
-          "记录展示态在一级标签名前显示对应颜色圆点，方便快速识别分类。",
-          "记录页增加单条连续地点时间轴：绿色宿舍、蓝色工位、黄色户外；地点可配置多段到达/离开记录并可删除。",
-          "新增记录编辑顺序调整为一级/二级标签、时间、描述、保存/删除，删除按钮改为文字。",
-          "今日汇总、周/月汇总支持任务/地点两种扇形图；任务饼图可选择是否纳入“其他”。",
-          "时间汇总以日 24h、周 168h、月 720h 为基准，月汇总不再因 30/31 天跳变。",
-          "执行页增加日/周/月范围切换及对应时间切换；目标新增按钮常驻，编辑按钮与标题同行。",
-          "目标支持二级、三级任务分别填写数量和描述，三级任务数量会参与母任务进度条。",
-          "目标迁移改为单个母任务迁移，按钮只在大编辑模式下出现，并放在小编辑按钮左侧。",
-          "任务加减进度控件贴近对应任务右侧，进度条改为简洁绿色斜纹样式。",
-          "习惯追踪支持自定义颜色，颜色选择器改为小方块，并与今日完成度放在同一行。",
-          "习惯完成度圆点平滑变化，100% 显示实心花；展示态显示最近七天。",
-          "习惯追踪标题下显示最近七天日期范围，月历入口移动到习惯名左侧，编辑和移动按钮仅在总编辑后显示。",
-          "复盘页保留日/周/月各自时间切换，汇总数据移动到复盘框架上方。",
-          "复盘结构从“事情-原因”改为“现象-原因-措施”，现象和原因自动编号，措施为空时展示态隐藏。",
-          "上下移动按钮统一改为小三角，目标、习惯、记录、复盘、规划均支持编辑态排序。",
+          "新增 Supabase 登录与自动云同步，支持本地和云端数据合并。",
+          "新增备份导入导出，并增强云同步错误提示。",
+          "优化记录页移动端密度，新增记录、标签编辑和排序更适合手机操作。",
+          "新增连续地点时间轴和地点时间分配统计。",
+          "新增任务/地点两种汇总扇形图，时间基准统一为日 24h、周 168h、月 720h。",
+          "目标支持二级、三级任务、数量进度、单个目标迁移和排序。",
+          "习惯追踪支持自定义颜色、最近七天展示、月历详情和达标率统计。",
+          "复盘结构升级为现象、原因、措施，并支持日、周、月复盘。",
         ],
       },
     };
-    const renderVersion = (version) => `
-      <div class="version-meta">
-        <strong>${version}</strong>
-        <span>更新时间：${versions[version].updatedAt}</span>
-      </div>
-      <div class="version-switch">
-        ${Object.keys(versions)
-          .map((item) => `<button class="toggle-button ${item === version ? "active" : ""}" type="button" data-modal-action="switch-version" data-version="${item}">${item}</button>`)
-          .join("")}
-      </div>
-      <ul class="version-list">
-        ${versions[version].items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-      </ul>
-    `;
+    const renderVersionHistory = () =>
+      Object.entries(versions)
+        .map(
+          ([version, detail]) => `
+            <section class="version-section">
+              <div class="version-meta">
+                <strong>${version}</strong>
+                <span>更新时间：${detail.updatedAt}</span>
+              </div>
+              <ol class="version-list">
+                ${detail.items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+              </ol>
+            </section>
+          `,
+        )
+        .join("");
     openModal(
-      `版本信息 ${APP_VERSION}`,
-      renderVersion(APP_VERSION),
-      (backdrop) => {
-        backdrop.addEventListener("click", (event) => {
-          if (event.target.dataset.modalAction !== "switch-version") return;
-          $("#modal-body", backdrop).innerHTML = renderVersion(event.target.dataset.version);
-        });
-      },
+      "版本信息",
+      renderVersionHistory(),
     );
   }
 
@@ -1127,7 +1261,7 @@
     if (!payload) throw new Error("云端还没有备份数据。");
     state = mergeCloudState(state, payload);
     saveState({ remote: false });
-    clearLogDrafts();
+    clearRecordDrafts();
     await saveRemoteNow();
     syncMeta.status = "synced";
     syncMeta.message = "已合并云端数据";
@@ -1150,7 +1284,7 @@
     if (remotePayload) {
       state = mergeCloudState(state, remotePayload);
       saveState({ remote: false });
-      clearLogDrafts();
+      clearRecordDrafts();
       await saveRemoteNow();
       syncMeta.message = "已自动合并并同步";
       return;
@@ -1186,7 +1320,7 @@
   }
 
   function openDatePicker() {
-    const input = $("#global-date");
+    const input = $("#global-date-picker") || $("#global-date");
     if (input.showPicker) input.showPicker();
     else input.focus();
   }
@@ -1414,41 +1548,29 @@
     openModal(
       isEdit ? "编辑目标" : "新增目标",
       `
-        <section class="parent-task-editor">
-          <div class="target-editor-heading">
-            <strong>母任务</strong>
-            <span>顶层目标</span>
-          </div>
-          <label class="form-row">
-            <span class="field-label">名称</span>
-            <input id="target-name" value="${escapeAttr(existingTarget?.name || "")}" placeholder="例如：完成文献阅读" />
-          </label>
-          <label class="form-row">
-            <span class="field-label">描述</span>
-            <input id="target-description" value="${escapeAttr(existingTarget?.description || "")}" placeholder="可选，一句话描述" />
-          </label>
-          <div class="compact-form-row">
+        <section class="target-tree-editor">
+          <div class="compact-form-row target-progress-row">
             <label class="check-inline">
               <input id="target-progress" class="checkbox" type="checkbox" ${existingTarget?.hasProgress !== false ? "checked" : ""} />
               进度条
             </label>
-            <label class="form-row">
-              <span class="field-label">数量（无子任务时计入）</span>
-              <input id="target-total" type="number" min="1" step="1" value="${existingTarget?.total || 1}" />
-            </label>
+            <button class="secondary-button square-add-button" type="button" data-modal-action="add-child-row" aria-label="新增二级任务">+</button>
+          </div>
+          <div class="task-edit-node level-1 parent-node ${existingTarget?.description ? "show-description" : ""}">
+            <div class="task-edit-line">
+              <span class="task-level-dot"></span>
+              <input id="target-name" class="task-name-input" value="${escapeAttr(existingTarget?.name || "")}" placeholder="母任务" />
+              <input id="target-total" class="task-total-input" type="number" min="1" step="1" value="${existingTarget?.total || 1}" placeholder="数量" aria-label="母任务数量" />
+              <button class="icon-button description-toggle" type="button" data-modal-action="toggle-task-description" aria-label="添加或收起描述">☰</button>
+            </div>
+            <textarea id="target-description" class="task-description-input" rows="${textareaRows(existingTarget?.description)}" placeholder="可选，一句话描述">${escapeHtml(existingTarget?.description || "")}</textarea>
+            <p class="hint">有二级任务时，进度按二级/三级任务数量计算，不再计算母任务数量。</p>
+          </div>
+          <div id="child-editor" class="task-tree-children">
+            ${children.length ? children.map(renderChildEditor).join("") : renderChildEditor()}
           </div>
         </section>
         ${isEdit ? `<button class="icon-button danger-icon modal-delete" type="button" data-modal-action="delete-target-modal" aria-label="删除目标">×</button>` : ""}
-        <div class="section-title child-editor-title">
-          <div>
-            <h2>子任务</h2>
-            <p class="hint">有子任务时，进度按二级/三级任务数量计算，不再计算母任务数量。</p>
-          </div>
-          <button class="secondary-button add-button" type="button" data-modal-action="add-child-row" aria-label="新增子任务">+</button>
-        </div>
-        <div id="child-editor" class="tag-editor">
-          ${children.length ? children.map(renderChildEditor).join("") : renderChildEditor()}
-        </div>
         <div class="button-row">
           <button class="primary-button" type="button" data-modal-action="save-target">${isEdit ? "保存" : "创建"}</button>
         </div>
@@ -1461,6 +1583,9 @@
           }
           if (action === "add-grandchild-row") {
             event.target.closest("[data-child-row]")?.querySelector("[data-grandchild-editor]")?.insertAdjacentHTML("beforeend", renderGrandchildEditor());
+          }
+          if (action === "toggle-task-description") {
+            event.target.closest(".task-edit-node")?.classList.toggle("show-description");
           }
           if (action === "delete-grandchild-row") {
             const row = event.target.closest("[data-grandchild-row]");
@@ -1496,41 +1621,40 @@
 
   function renderChildEditor(child = null) {
     return `
-      <section class="tag-card child-task-card" data-child-row data-child-id="${child?.id || ""}">
-        <div class="target-editor-heading child-heading">
-          <strong>二级任务</strong>
-          <span>子任务</span>
+      <section class="task-edit-node level-2 ${child?.description ? "show-description" : ""}" data-child-row data-child-id="${child?.id || ""}">
+        <div class="task-edit-line">
+          <span class="task-level-dot"></span>
+          <input class="task-name-input" data-child-field="name" value="${escapeAttr(child?.name || "")}" placeholder="二级任务" />
+          <input class="task-total-input" data-child-field="total" type="number" min="1" step="1" value="${child?.total || 1}" placeholder="数量" aria-label="二级任务数量" />
+          <button class="icon-button description-toggle" type="button" data-modal-action="toggle-task-description" aria-label="添加或收起描述">☰</button>
         </div>
-        <div class="grid-2">
-          <label class="form-row"><span class="field-label">名称</span><input data-child-field="name" value="${escapeAttr(child?.name || "")}" placeholder="例如：读完第一篇" /></label>
-          <label class="form-row"><span class="field-label">数量</span><input data-child-field="total" type="number" min="1" step="1" value="${child?.total || 1}" /></label>
+        <textarea class="task-description-input" data-child-field="description" rows="${textareaRows(child?.description)}" placeholder="可选，一句话描述">${escapeHtml(child?.description || "")}</textarea>
+        <div class="task-node-actions">
+          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增</button>
+          <button class="danger-button" type="button" data-modal-action="delete-child-row" aria-label="删除二级任务">删除</button>
         </div>
-        <label class="form-row"><span class="field-label">描述</span><input data-child-field="description" value="${escapeAttr(child?.description || "")}" placeholder="可选，一句话描述" /></label>
-        <div class="grandchild-editor-wrap">
-          <div class="section-title mini-title">
-            <div>
-              <h2>三级任务</h2>
-              <p class="hint">每条都可单独设置数量。</p>
-            </div>
-            <button class="secondary-button add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">+</button>
-          </div>
-          <div class="grandchild-editor" data-grandchild-editor>
-            ${(child?.children || []).map(renderGrandchildEditor).join("")}
-          </div>
+        <div class="task-tree-children" data-grandchild-editor>
+          ${(child?.children || []).map(renderGrandchildEditor).join("")}
         </div>
-        <button class="icon-button danger-icon" type="button" data-modal-action="delete-child-row" aria-label="删除子任务">×</button>
       </section>
     `;
   }
 
   function renderGrandchildEditor(grandchild = null) {
     return `
-      <div class="grandchild-row" data-grandchild-row data-grandchild-id="${grandchild?.id || ""}">
-        <input data-grandchild-field="name" value="${escapeAttr(grandchild?.name || "")}" placeholder="三级任务" aria-label="三级任务" />
-        <input data-grandchild-field="total" type="number" min="1" step="1" value="${grandchild?.total || 1}" aria-label="三级任务数量" />
-        <input data-grandchild-field="description" value="${escapeAttr(grandchild?.description || "")}" placeholder="一句话描述，可不填" aria-label="三级任务描述" />
-        <button class="icon-button danger-icon" type="button" data-modal-action="delete-grandchild-row" aria-label="删除三级任务">×</button>
-      </div>
+      <section class="task-edit-node level-3 ${grandchild?.description ? "show-description" : ""}" data-grandchild-row data-grandchild-id="${grandchild?.id || ""}">
+        <div class="task-edit-line">
+          <span class="task-level-dot"></span>
+          <input class="task-name-input" data-grandchild-field="name" value="${escapeAttr(grandchild?.name || "")}" placeholder="三级任务" aria-label="三级任务" />
+          <input class="task-total-input" data-grandchild-field="total" type="number" min="1" step="1" value="${grandchild?.total || 1}" placeholder="数量" aria-label="三级任务数量" />
+          <button class="icon-button description-toggle" type="button" data-modal-action="toggle-task-description" aria-label="添加或收起描述">☰</button>
+        </div>
+        <textarea class="task-description-input" data-grandchild-field="description" rows="${textareaRows(grandchild?.description)}" placeholder="可选，一句话描述">${escapeHtml(grandchild?.description || "")}</textarea>
+        <div class="task-node-actions">
+          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增</button>
+          <button class="danger-button" type="button" data-modal-action="delete-grandchild-row" aria-label="删除三级任务">删除</button>
+        </div>
+      </section>
     `;
   }
 
@@ -1579,7 +1703,8 @@
       hasProgress: $("#target-progress", backdrop).checked,
       total,
       done: Math.min(existingTarget?.done || 0, total),
-      collapsed: existingTarget?.collapsed || false,
+      startedAt: existingTarget?.startedAt || dateKey(),
+      collapsed: existingTarget?.collapsed ?? true,
       children,
     };
   }
@@ -1741,6 +1866,7 @@
     }
     if (action === "open-login") return openLoginModal();
     if (action === "shift-scope-date") return shiftScopeDate(actionNode.dataset.owner, Number(actionNode.dataset.direction) || 0);
+    if (action === "set-record-summary-scope") return setRecordSummaryScope(actionNode.dataset.scope);
     if (action === "set-summary-mode") return setSummaryMode(actionNode.dataset.owner, actionNode.dataset.mode);
     if (action === "toggle-summary-other") return toggleSummaryOther(actionNode.dataset.owner, actionNode.checked);
     if (action === "toggle-record-edit") return toggleEditMode("recordEditing");
@@ -1748,8 +1874,11 @@
     if (action === "toggle-habit-edit") return toggleEditMode("habitEditing");
     if (action === "toggle-review-edit") return toggleEditMode("reviewEditing");
     if (action === "edit-segments") return openSegmentsModal();
-    if (action === "edit-locations") return openLocationsModal();
     if (action === "edit-tags") return openTagsModal();
+    if (action === "add-location") return addLocationRecord();
+    if (action === "edit-location") return editLocationRecord(actionNode.closest("[data-location-id]").dataset.locationId);
+    if (action === "save-location") return saveLocationRecord(actionNode.closest("[data-location-id]"));
+    if (action === "delete-location") return requestDeleteLocation(actionNode.closest("[data-location-id]"));
     if (action === "add-log") return addLog(actionNode.dataset.segmentId);
     if (action === "edit-log") return editLog(actionNode.closest("[data-log-id]").dataset.logId);
     if (action === "save-log") return saveLog(actionNode.closest("[data-log-id]"));
@@ -1770,18 +1899,19 @@
     if (action === "move-habit") return moveHabit(actionNode.closest("[data-habit-id]").dataset.habitId, Number(actionNode.dataset.direction));
     if (action === "open-habit-calendar") return openHabitCalendar(getHabit(actionNode.closest("[data-habit-id]").dataset.habitId));
     if (action === "set-review-scope") return setState((draft) => (draft.reviewScope = actionNode.dataset.scope));
+    if (action === "shift-review-date") return shiftReviewDate(actionNode.dataset.reviewScope, Number(actionNode.dataset.direction) || 0);
     if (action === "add-plan") return openPlanModal();
     if (action === "toggle-plan-edit") return togglePlanEdit();
     if (action === "edit-plan") return openPlanModal(Number(actionNode.closest("[data-plan-index]").dataset.planIndex));
     if (action === "delete-plan") return confirmDelete("确认要删除这个长期规划吗？", () => deletePlan(Number(actionNode.closest("[data-plan-index]").dataset.planIndex)));
     if (action === "move-plan") return movePlan(Number(actionNode.closest("[data-plan-index]").dataset.planIndex), Number(actionNode.dataset.direction));
-    if (action === "add-review-item") return addReviewItem();
-    if (action === "add-review-reason") return addReviewReason(actionNode.closest("[data-review-id]").dataset.reviewId);
-    if (action === "delete-review-reason") return confirmDelete("确认要删除这个原因吗？", () => deleteReviewReason(actionNode.dataset.reviewId, actionNode.dataset.reasonId));
+    if (action === "add-review-item") return addReviewItem(reviewScopeFromNode(actionNode));
+    if (action === "add-review-reason") return addReviewReason(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId);
+    if (action === "delete-review-reason") return confirmDelete("确认要删除这个原因吗？", () => deleteReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId));
     if (action === "edit-review-item") return editReviewItem(actionNode.closest("[data-review-id]").dataset.reviewId);
     if (action === "save-review-item") return saveReviewItem(actionNode.closest("[data-review-id]"));
-    if (action === "delete-review-item") return confirmDelete("确认要删除这条复盘吗？", () => deleteReviewItem(actionNode.closest("[data-review-id]").dataset.reviewId));
-    if (action === "move-review-item") return moveReviewItem(actionNode.closest("[data-review-id]").dataset.reviewId, Number(actionNode.dataset.direction));
+    if (action === "delete-review-item") return confirmDelete("确认要删除这条复盘吗？", () => deleteReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId));
+    if (action === "move-review-item") return moveReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, Number(actionNode.dataset.direction));
   });
 
   document.addEventListener("input", (event) => {
@@ -1789,10 +1919,13 @@
     if (!actionNode) return;
     const action = actionNode.dataset.action;
     if (action === "update-log") updateLog(actionNode.closest("[data-log-id]").dataset.logId, actionNode.dataset.field, actionNode.value, false);
+    if (action === "update-location") updateLocationDraft(actionNode.closest("[data-location-id]").dataset.locationId, actionNode.dataset.field, actionNode.value, false);
     if (action === "update-habit") updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, false);
-    if (action === "update-review-item") updateReviewItem(actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
-    if (action === "update-review-reason") updateReviewReason(actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
+    if (action === "update-review-item") updateReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
+    if (action === "update-review-reason") updateReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
     if (action === "set-review-date") setReviewDate(actionNode.value);
+    if (action === "set-scope-date") setScopeDate(actionNode.dataset.owner, actionNode.dataset.scope, actionNode.value);
+    if (action === "set-review-scope-date") setReviewScopeDate(actionNode.dataset.reviewScope, actionNode.value);
   });
 
   document.addEventListener("change", (event) => {
@@ -1801,6 +1934,9 @@
     if (actionNode.dataset.action === "update-log") {
       updateLog(actionNode.closest("[data-log-id]").dataset.logId, actionNode.dataset.field, actionNode.value, actionNode.dataset.field !== "note");
     }
+    if (actionNode.dataset.action === "update-location") {
+      updateLocationDraft(actionNode.closest("[data-location-id]").dataset.locationId, actionNode.dataset.field, actionNode.value, false);
+    }
     if (actionNode.dataset.action === "update-habit") {
       updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, true);
     }
@@ -1808,23 +1944,109 @@
       const row = actionNode.closest("[data-subtask-id]");
       setSubtaskDone(row.dataset.targetId, row.dataset.subtaskId, actionNode.checked);
     }
+    if (actionNode.dataset.action === "set-scope-date") {
+      setScopeDate(actionNode.dataset.owner, actionNode.dataset.scope, actionNode.value);
+    }
+    if (actionNode.dataset.action === "set-review-scope-date") {
+      setReviewScopeDate(actionNode.dataset.reviewScope, actionNode.value);
+    }
   });
 
   $("#global-date").addEventListener("change", (event) => {
+    const nextDate = normalizeDateKey(event.target.value);
+    if (!nextDate) {
+      event.target.value = dateKey();
+      return;
+    }
     setState((draft) => {
-      clearLogDrafts();
-      draft.date = event.target.value || todayIso();
+      clearRecordDrafts();
+      draft.date = nextDate;
+    });
+  });
+
+  $("#global-date-picker")?.addEventListener("change", (event) => {
+    const nextDate = normalizeDateKey(event.target.value);
+    if (!nextDate) return;
+    setState((draft) => {
+      clearRecordDrafts();
+      draft.date = nextDate;
     });
   });
 
   $$(".tab-button").forEach((button) => {
     button.addEventListener("click", () => {
       setState((draft) => {
-        if (draft.activeTab !== button.dataset.tab) clearLogDrafts();
+        if (draft.activeTab !== button.dataset.tab) clearRecordDrafts();
         draft.activeTab = button.dataset.tab;
       });
     });
   });
+
+  function addLocationRecord() {
+    const id = uid();
+    ui.editingLocations.add(id);
+    ui.locationDrafts.set(id, {
+      id,
+      date: dateKey(),
+      type: "",
+      start: "",
+      end: "",
+    });
+    render();
+  }
+
+  function editLocationRecord(locationId) {
+    const entry = locationEntriesForDate().find((item) => item.id === locationId);
+    if (entry) ui.locationDrafts.set(locationId, { ...entry, date: dateKey() });
+    ui.editingLocations.add(locationId);
+    render();
+  }
+
+  function updateLocationDraft(locationId, field, value) {
+    const draft = ui.locationDrafts.get(locationId);
+    if (!draft) return;
+    draft[field] = value;
+  }
+
+  function saveLocationRecord(locationNode) {
+    const locationId = locationNode.dataset.locationId;
+    const draft = ui.locationDrafts.get(locationId);
+    if (!draft) return;
+    if (!draft.type || (!draft.start && !draft.end)) {
+      alert("请先选择地点，并至少填写开始或结束时间。");
+      return;
+    }
+    setState((stateDraft) => {
+      persistLocationEntry(stateDraft, draft);
+    });
+    ui.locationDrafts.delete(locationId);
+    ui.editingLocations.delete(locationId);
+    render();
+  }
+
+  function requestDeleteLocation(locationNode) {
+    const locationId = locationNode.dataset.locationId;
+    const draft = ui.locationDrafts.get(locationId);
+    const remove = () => {
+      ui.editingLocations.delete(locationId);
+      ui.locationDrafts.delete(locationId);
+      if (draft && locationNode.dataset.draft === "true") {
+        render();
+        return;
+      }
+      deleteLocationRecord(locationId);
+    };
+    if (locationNode.dataset.draft === "true") remove();
+    else confirmDelete("确认要删除这条地点时间吗？", remove);
+  }
+
+  function deleteLocationRecord(locationId) {
+    setState((draft) => {
+      const entry = locationEntriesForDate().find((item) => item.id === locationId);
+      if (!entry) return;
+      persistLocationEntry(draft, { ...entry, type: "", date: dateKey() });
+    });
+  }
 
   function addLog(segmentId) {
     const id = uid();
@@ -1870,7 +2092,7 @@
     const current = new Date(`${dateKey()}T00:00:00`);
     current.setDate(current.getDate() + days);
     setState((draft) => {
-      clearLogDrafts();
+      clearRecordDrafts();
       draft.date = isoFromDate(current);
     });
   }
@@ -1882,7 +2104,7 @@
     if (scope === "week") current.setDate(current.getDate() + direction * 7);
     if (scope === "month") current.setMonth(current.getMonth() + direction);
     setState((draft) => {
-      clearLogDrafts();
+      clearRecordDrafts();
       draft.date = isoFromDate(current);
     });
   }
@@ -1891,6 +2113,12 @@
     if (!["task", "location"].includes(mode)) return;
     if (owner === "review") ui.reviewSummaryMode = mode;
     else ui.recordSummaryMode = mode;
+    render();
+  }
+
+  function setRecordSummaryScope(scope) {
+    if (!["day", "week", "month"].includes(scope)) return;
+    ui.recordSummaryScope = scope;
     render();
   }
 
@@ -1934,9 +2162,19 @@
     ui.editingLogs.clear();
   }
 
+  function clearLocationDrafts() {
+    ui.locationDrafts.clear();
+    ui.editingLocations.clear();
+  }
+
+  function clearRecordDrafts() {
+    clearLogDrafts();
+    clearLocationDrafts();
+  }
+
   function toggleEditMode(key) {
     ui[key] = !ui[key];
-    if (key === "recordEditing" && !ui[key]) clearLogDrafts();
+    if (key === "recordEditing" && !ui[key]) clearRecordDrafts();
     if (key === "reviewEditing" && !ui[key]) ui.editingReviews.clear();
     render();
   }
@@ -1944,7 +2182,9 @@
   function toggleTarget(targetId) {
     setState(() => {
       const target = getTarget(targetId);
-      target.collapsed = !target.collapsed;
+      if (!target) return;
+      const collapsed = target.collapsed !== false;
+      target.collapsed = !collapsed;
     });
   }
 
@@ -1983,7 +2223,8 @@
     return {
       ...structuredClone(target),
       id: uid(),
-      collapsed: false,
+      startedAt: target.startedAt || dateKey(),
+      collapsed: true,
       children: (target.children || []).map(cloneSubtaskForMigration),
     };
   }
@@ -2048,18 +2289,53 @@
     });
   }
 
-  function addReviewItem() {
+  function setScopeDate(owner, scope, value) {
+    const nextDate = normalizeScopePickerValue(scope, value);
+    if (!nextDate) return;
+    setState((draft) => {
+      clearRecordDrafts();
+      draft.date = nextDate;
+      if (owner === "target") draft.targetScope = "day";
+    });
+  }
+
+  function setReviewScopeDate(scope, value) {
+    const nextDate = normalizeScopePickerValue(scope, value);
+    if (!nextDate) return;
+    setState((draft) => {
+      draft.reviewDates ||= {};
+      draft.reviewDates[scope] = nextDate;
+    });
+  }
+
+  function shiftReviewDate(scope, direction) {
+    if (!["day", "week", "month"].includes(scope)) return;
+    const current = new Date(`${reviewDate(scope)}T00:00:00`);
+    if (scope === "day") current.setDate(current.getDate() + direction);
+    if (scope === "week") current.setDate(current.getDate() + direction * 7);
+    if (scope === "month") current.setMonth(current.getMonth() + direction);
+    setState((draft) => {
+      draft.reviewDates ||= {};
+      draft.reviewDates[scope] = isoFromDate(current);
+    });
+  }
+
+  function reviewScopeFromNode(node) {
+    return node.dataset.reviewScope || node.closest("[data-review-scope]")?.dataset.reviewScope || state.reviewScope || "day";
+  }
+
+  function addReviewItem(scope = state.reviewScope) {
     const id = uid();
     ui.editingReviews.add(id);
     setState((draft) => {
-      const list = reviewsForScopeDraft(draft, state.reviewScope, scopeKey(state.reviewScope));
+      const list = reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope)));
       list.push({ id, phenomenon: "", reasons: [{ id: uid(), text: "", measure: "" }] });
     });
   }
 
-  function addReviewReason(itemId) {
+  function addReviewReason(scope, itemId) {
     setState(() => {
-      const item = reviewsForCurrentScope().find((review) => review.id === itemId);
+      const item = reviewsForScope(scope).find((review) => review.id === itemId);
       if (!item) return;
       item.reasons ||= [];
       item.reasons.push({ id: uid(), text: "", measure: "" });
@@ -2077,33 +2353,33 @@
     render();
   }
 
-  function updateReviewItem(itemId, field, value) {
-    const item = reviewsForCurrentScope().find((review) => review.id === itemId);
+  function updateReviewItem(scope, itemId, field, value) {
+    const item = reviewsForScope(scope).find((review) => review.id === itemId);
     if (!item) return;
     item[field] = value;
     saveState();
   }
 
-  function updateReviewReason(itemId, reasonId, field, value) {
-    const item = reviewsForCurrentScope().find((review) => review.id === itemId);
+  function updateReviewReason(scope, itemId, reasonId, field, value) {
+    const item = reviewsForScope(scope).find((review) => review.id === itemId);
     const reason = item?.reasons?.find((entry) => entry.id === reasonId);
     if (!reason) return;
     reason[field] = value;
     saveState();
   }
 
-  function deleteReviewReason(itemId, reasonId) {
+  function deleteReviewReason(scope, itemId, reasonId) {
     setState(() => {
-      const item = reviewsForCurrentScope().find((review) => review.id === itemId);
+      const item = reviewsForScope(scope).find((review) => review.id === itemId);
       if (!item?.reasons) return;
       item.reasons = item.reasons.filter((reason) => reason.id !== reasonId);
       if (!item.reasons.length) item.reasons.push({ id: uid(), text: "", measure: "" });
     });
   }
 
-  function deleteReviewItem(itemId) {
+  function deleteReviewItem(scope, itemId) {
     setState((draft) => {
-      const list = reviewsForScopeDraft(draft, state.reviewScope, scopeKey(state.reviewScope));
+      const list = reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope)));
       const index = list.findIndex((review) => review.id === itemId);
       if (index >= 0) list.splice(index, 1);
     });
@@ -2144,9 +2420,9 @@
     });
   }
 
-  function moveReviewItem(itemId, direction) {
+  function moveReviewItem(scope, itemId, direction) {
     setState((draft) => {
-      moveInListById(reviewsForScopeDraft(draft, state.reviewScope, scopeKey(state.reviewScope)), itemId, direction);
+      moveInListById(reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope))), itemId, direction);
     });
   }
 
@@ -2230,9 +2506,18 @@
     }, {});
   }
 
-  function habitRateForScope() {
+  function totalsForLogScope(scope, date = dateKey()) {
+    return datesInScope(scope, date).reduce((acc, itemDate) => {
+      for (const [tagId, minutes] of Object.entries(getTotals(state.logs[itemDate] || []))) {
+        acc[tagId] = (acc[tagId] || 0) + minutes;
+      }
+      return acc;
+    }, {});
+  }
+
+  function habitRateForScope(scope = state.reviewScope, date = dateKey()) {
     if (!state.habits.length) return 0;
-    const dates = datesInScope(state.reviewScope, dateKey());
+    const dates = datesInScope(scope, date);
     let total = 0;
     let completed = 0;
     state.habits.forEach((habit) => {
@@ -2277,8 +2562,11 @@
     if (!children.length) return [target];
     const items = [];
     const visit = (item) => {
+      if (item.children?.length) {
+        item.children.forEach(visit);
+        return;
+      }
       if (item.hasProgress !== false) items.push(item);
-      if (item.children?.length) item.children.forEach(visit);
     };
     children.forEach(visit);
     return items.length ? items : [target];
@@ -2292,6 +2580,13 @@
 
   function isSubtaskDone(item) {
     return item.hasProgress !== false && (item.done || 0) >= (item.total || 1);
+  }
+
+  function executionDays(target) {
+    const start = new Date(`${target.startedAt || dateKey()}T00:00:00`);
+    const current = new Date(`${dateKey()}T00:00:00`);
+    const diff = Math.floor((current - start) / 86400000);
+    return Math.max(0, diff);
   }
 
   function targetsForScopeDraft(draft, scope, key) {
@@ -2310,6 +2605,19 @@
     return { day: "日目标", week: "周目标", month: "月目标" }[scope];
   }
 
+  function summaryScopeTitle(scope) {
+    return { day: "今日汇总", week: "本周汇总", month: "本月汇总" }[scope] || "汇总";
+  }
+
+  function summaryScopeShortLabel(scope) {
+    return { day: "今日", week: "本周", month: "本月" }[scope] || "今日";
+  }
+
+  function recordSummaryHint(scope) {
+    const totals = totalsForLogScope(scope, dateKey());
+    return `已记录 ${formatDuration(sumMinutes(Object.values(totals)))} / ${formatDuration(minutesInScope(scope))}`;
+  }
+
   function reviewLabel(scope) {
     return { day: "日复盘", week: "周复盘", month: "月复盘" }[scope];
   }
@@ -2325,9 +2633,37 @@
     return `${key.slice(0, 7)}`;
   }
 
+  function scopeSwitchLabel(scope) {
+    return { day: "日期", week: "周", month: "月份" }[scope] || "日期";
+  }
+
+  function scopePickerType(scope) {
+    return scope === "month" ? "month" : "date";
+  }
+
+  function scopePickerValue(scope, date = dateKey()) {
+    return scope === "month" ? scopeKey("month", date).slice(0, 7) : date;
+  }
+
+  function normalizeScopePickerValue(scope, value) {
+    if (scope === "month") {
+      const text = String(value || "").trim();
+      return /^\d{4}-\d{2}$/.test(text) ? `${text}-01` : "";
+    }
+    return normalizeDateKey(value);
+  }
+
   function weekdayText(date) {
     const day = new Date(`${date}T00:00:00`).getDay();
     return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][day];
+  }
+
+  function normalizeDateKey(value) {
+    const text = String(value || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+    const parsed = new Date(`${text}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return isoFromDate(parsed) === text ? text : "";
   }
 
   function timeToMinutes(value) {
@@ -2344,6 +2680,14 @@
     return { dorm: "宿舍", work: "工位", outdoor: "户外" }[type] || "户外";
   }
 
+  function locationColor(type) {
+    return { dorm: "#4d8b57", work: "#4e7fa8", outdoor: "#d8b74e" }[type] || colors[0];
+  }
+
+  function formatLocationRange(entry) {
+    return `${entry.start || ""} - ${entry.end || ""}`;
+  }
+
   function recordAxisRange() {
     const segments = state.settings.segments || defaults.settings.segments;
     const start = timeToMinutes(segments[0]?.start || "00:00");
@@ -2352,9 +2696,9 @@
     return { start, end };
   }
 
-  function locationSlicesForRange(start, end) {
+  function locationSlicesForRange(start, end, date = dateKey()) {
     const boundaries = new Set([start, end]);
-    const intervals = locationIntervals();
+    const intervals = locationIntervals(date);
     intervals.forEach((interval) => {
       [interval.start, interval.end, interval.start + 1440, interval.end + 1440].forEach((point) => {
         if (point > start && point < end) boundaries.add(point);
@@ -2363,7 +2707,7 @@
     const points = Array.from(boundaries).sort((a, b) => a - b);
     return points.slice(0, -1).map((point, index) => {
       const next = points[index + 1];
-      const type = locationTypeAt((point + next) / 2);
+      const type = locationTypeAt((point + next) / 2, date, intervals);
       return {
         type,
         start: point,
@@ -2373,8 +2717,8 @@
     });
   }
 
-  function locationIntervals() {
-    const locations = normalizeLocations(state.settings.locations);
+  function locationIntervals(date = dateKey()) {
+    const locations = normalizeLocations(state.locationLogs?.[date] || {});
     return [
       ...locations.dorm.flatMap((row) => splitLocationRange("dorm", row.arrive, row.leave)),
       ...locations.work.flatMap((row) => splitLocationRange("work", row.arrive, row.leave)),
@@ -2394,6 +2738,28 @@
     };
   }
 
+  function normalizeLocationRecords(locations = {}) {
+    if (Array.isArray(locations.work) || Array.isArray(locations.dorm)) {
+      return {
+        work: (locations.work || []).map(normalizeLocationRecordRow).filter(Boolean),
+        dorm: (locations.dorm || []).map(normalizeLocationRecordRow).filter(Boolean),
+      };
+    }
+    return normalizeLocations(locations);
+  }
+
+  function normalizeLocationRecordRow(row) {
+    if (!row) return null;
+    const arrive = row.arrive ?? row.start ?? "";
+    const leave = row.leave ?? row.end ?? "";
+    if (!arrive && !leave) return null;
+    return {
+      id: row.id || uid(),
+      arrive,
+      leave,
+    };
+  }
+
   function normalizeLocationRow(row) {
     if (!row?.arrive || !row?.leave || row.arrive === row.leave) return null;
     return {
@@ -2401,6 +2767,26 @@
       arrive: row.arrive,
       leave: row.leave,
     };
+  }
+
+  function locationEntriesForDate(date = dateKey(), source = null) {
+    const locations = normalizeLocationRecords(source || state.locationLogs?.[date] || {});
+    return [
+      ...locations.work.map((row) => ({ id: row.id, type: "work", start: row.arrive, end: row.leave })),
+      ...locations.dorm.map((row) => ({ id: row.id, type: "dorm", start: row.arrive, end: row.leave })),
+    ].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+  }
+
+  function persistLocationEntry(draft, entry) {
+    draft.locationLogs ||= {};
+    const date = entry.date || dateKey();
+    const daily = normalizeLocationRecords(draft.locationLogs[date] || {});
+    daily.work = daily.work.filter((row) => row.id !== entry.id);
+    daily.dorm = daily.dorm.filter((row) => row.id !== entry.id);
+    if (entry.type && (entry.start || entry.end)) {
+      daily[entry.type].push({ id: entry.id, arrive: entry.start || "", leave: entry.end || "" });
+    }
+    draft.locationLogs[date] = daily;
   }
 
   function splitLocationRange(type, startValue, endValue) {
@@ -2414,9 +2800,9 @@
     ];
   }
 
-  function locationTypeAt(minute) {
+  function locationTypeAt(minute, date = dateKey(), cachedIntervals = null) {
     const normalized = ((minute % 1440) + 1440) % 1440;
-    const intervals = locationIntervals();
+    const intervals = cachedIntervals || locationIntervals(date);
     const work = intervals.find((interval) => interval.type === "work" && normalized >= interval.start && normalized < interval.end);
     if (work) return "work";
     const dorm = intervals.find((interval) => interval.type === "dorm" && normalized >= interval.start && normalized < interval.end);
@@ -2424,18 +2810,21 @@
     return "outdoor";
   }
 
-  function locationTotalsForScope(scope) {
-    const daily = locationTotalsForDay();
-    const days = baselineDaysInScope(scope);
-    return {
-      __loc_dorm: daily.__loc_dorm * days,
-      __loc_work: daily.__loc_work * days,
-      __loc_outdoor: daily.__loc_outdoor * days,
-    };
+  function locationTotalsForScope(scope, date = dateKey()) {
+    return datesInScope(scope, date).slice(0, baselineDaysInScope(scope)).reduce(
+      (totals, itemDate) => {
+        const daily = locationTotalsForDay(itemDate);
+        totals.__loc_dorm += daily.__loc_dorm;
+        totals.__loc_work += daily.__loc_work;
+        totals.__loc_outdoor += daily.__loc_outdoor;
+        return totals;
+      },
+      { __loc_dorm: 0, __loc_work: 0, __loc_outdoor: 0 },
+    );
   }
 
-  function locationTotalsForDay() {
-    const slices = locationSlicesForRange(0, 1440);
+  function locationTotalsForDay(date = dateKey()) {
+    const slices = locationSlicesForRange(0, 1440, date);
     return slices.reduce(
       (totals, slice) => {
         totals[`__loc_${slice.type}`] += slice.end - slice.start;

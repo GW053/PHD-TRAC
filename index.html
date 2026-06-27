@@ -9,11 +9,14 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">TODAY FLOW</p>
-          <div class="brand-line">
-            <h1>记录与复盘</h1>
-            <a class="version-link" href="#" data-action="open-version">v1.2</a>
+        <div class="brand-block">
+          <div class="app-icon" aria-hidden="true">◷</div>
+          <div class="title-area">
+            <div class="brand-line">
+              <h1>记录与复盘</h1>
+              <a class="version-link" href="#" data-action="open-version">v1.3</a>
+            </div>
+            <p id="top-current-date" class="top-current-date"></p>
           </div>
         </div>
         <div class="top-actions">
@@ -24,13 +27,13 @@
 
       <div class="date-row">
         <span class="date-label">日期</span>
-        <div class="date-chip">
-          <button class="date-arrow" type="button" data-action="shift-date" data-days="-1" aria-label="前一天">‹</button>
-          <input id="global-date" type="date" />
-          <span id="weekday-label" class="weekday-label"></span>
-          <button class="date-arrow" type="button" data-action="shift-date" data-days="1" aria-label="后一天">›</button>
-        </div>
-        <button class="date-calendar-button" type="button" data-action="open-date-picker" aria-label="打开日历">▦</button>
+        <button class="date-arrow" type="button" data-action="shift-date" data-days="-1" aria-label="前一天">‹</button>
+        <input id="global-date" class="date-text-input" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" />
+        <label class="date-calendar-button" aria-label="打开日历">
+          <span aria-hidden="true">▦</span>
+          <input id="global-date-picker" type="date" />
+        </label>
+        <button class="date-arrow" type="button" data-action="shift-date" data-days="1" aria-label="后一天">›</button>
       </div>
 
       <main id="app" class="app-main"></main>

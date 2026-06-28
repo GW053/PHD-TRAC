@@ -4,8 +4,8 @@
   const SUPABASE_URL = "https://hgmpswhitmenyvnxotff.supabase.co";
   const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_WW3rmZCePegJsIf6LeqFvQ_KRgHD9pz";
   const SUPABASE_TABLE = "phd_trac_records";
-  const APP_VERSION = "v1.3";
-  const VERSION_UPDATED_AT = "2026-06-27";
+  const APP_VERSION = "v1.4";
+  const VERSION_UPDATED_AT = "2026-06-28";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -41,13 +41,18 @@
         { id: "entertainment", name: "娱乐", color: "#b35d4a", subtags: ["联络", "游戏", "刷社媒"] },
       ],
       plans: ["提升文献阅读能力", "锻炼英语口语能力", "基础知识复习"],
+      targetTags: ["未分类"],
+      targetDefaultTag: "未分类",
       locations: { work: [], dorm: [] },
     },
     logs: {},
     locationLogs: {},
     targets: {},
+    targetMigrations: {},
     habits: [],
     reviews: {},
+    weeklyReviews: {},
+    monthlyReviews: {},
   };
 
   let state = normalizeStateShape(loadState());
@@ -71,10 +76,14 @@
     reviewEditing: false,
     plansEditing: false,
     recordSummaryScope: "day",
+    targetFilterTag: "__all",
+    collapsedTargetTags: new Set(),
     recordSummaryMode: "task",
     reviewSummaryMode: "task",
     recordSummaryIncludeOther: false,
     reviewSummaryIncludeOther: false,
+    monthReviewMode: "red",
+    expandedKeyEvents: new Set(),
   };
 
   function loadState() {
@@ -98,6 +107,11 @@
       month: normalized.reviewDates?.month || normalized.date || todayIso(),
     };
     normalized.locationLogs ||= {};
+    normalized.targetMigrations ||= {};
+    normalized.weeklyReviews ||= {};
+    normalized.monthlyReviews ||= {};
+    normalized.settings.targetTags = targetTagListFromState(normalized);
+    normalized.settings.targetDefaultTag = normalizedTargetDefaultTag(normalized.settings.targetDefaultTag, normalized.settings.targetTags);
     const legacyLocations = normalizeLocations(normalized.settings?.locations || {});
     const hasLocationLogs = Object.values(normalized.locationLogs).some((records) => {
       const daily = normalizeLocations(records);
@@ -155,13 +169,17 @@
         segments: mergeById(remote.settings.segments || [], local.settings.segments || []),
         tags: mergeById(remote.settings.tags || [], local.settings.tags || []),
         plans: mergeTextList(remote.settings.plans || [], local.settings.plans || []),
+        targetTags: mergeTextList(remote.settings.targetTags || [], local.settings.targetTags || []),
         locations: { work: [], dorm: [] },
       },
       logs: mergeDateCollections(remote.logs || {}, local.logs || {}),
       locationLogs: mergeLocationLogs(remote.locationLogs || {}, local.locationLogs || {}),
       targets: mergeScopedCollections(remote.targets || {}, local.targets || {}),
+      targetMigrations: { ...(remote.targetMigrations || {}), ...(local.targetMigrations || {}) },
       habits: mergeHabits(remote.habits || [], local.habits || []),
       reviews: mergeScopedCollections(remote.reviews || {}, local.reviews || {}),
+      weeklyReviews: { ...(remote.weeklyReviews || {}), ...(local.weeklyReviews || {}) },
+      monthlyReviews: { ...(remote.monthlyReviews || {}), ...(local.monthlyReviews || {}) },
     });
   }
 
@@ -238,6 +256,7 @@
 
   function setState(mutator) {
     mutator(state);
+    syncTargetMigration(state, dateKey());
     saveState();
     render();
   }
@@ -495,8 +514,10 @@
               ${
                 ui.recordEditing
                   ? `<div class="row-actions">
-                      <button class="move-button" type="button" data-action="move-log" data-direction="-1" aria-label="上移">▴</button>
-                      <button class="move-button" type="button" data-action="move-log" data-direction="1" aria-label="下移">▾</button>
+                      <span class="move-stack">
+                        <button class="move-button" type="button" data-action="move-log" data-direction="-1" aria-label="上移">▴</button>
+                        <button class="move-button" type="button" data-action="move-log" data-direction="1" aria-label="下移">▾</button>
+                      </span>
                       <button class="ghost-button compact-action" type="button" data-action="edit-log">编辑</button>
                     </div>`
                   : ""
@@ -629,9 +650,11 @@
   function renderExecute() {
     state.targetScope = "day";
     const targets = targetsForCurrentScope();
-    const sortedTargets = [...targets].sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)));
+    const targetTags = targetTagList(targets);
+    if (ui.targetFilterTag !== "__all" && !targetTags.includes(ui.targetFilterTag)) ui.targetFilterTag = "__all";
     $("#app").innerHTML = `
       <section class="view" data-view="execute">
+        ${renderTargetTagBar(targetTags)}
         <section class="section-band">
           <div class="section-title">
             <div>
@@ -640,11 +663,12 @@
             </div>
             <div class="button-row">
               <button class="secondary-button add-button" type="button" data-action="add-target" aria-label="新增目标">+</button>
+              ${ui.targetEditing ? `<button class="secondary-button" type="button" data-action="migrate-incomplete-targets">迁移</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-target-edit">${ui.targetEditing ? "完成" : "编辑"}</button>
             </div>
           </div>
           <div class="task-stack">
-            ${sortedTargets.length ? sortedTargets.map((target) => renderTarget(target)).join("") : `<p class="empty">先添加一个目标，之后可以继续拆到二级和三级任务。</p>`}
+            ${targets.length ? renderTargetGroups(targets, targetTags) : `<p class="empty">先添加一个目标，之后可以继续拆到二级和三级任务。</p>`}
           </div>
         </section>
 
@@ -667,6 +691,41 @@
     `;
   }
 
+  function renderTargetTagBar(tags) {
+    return `
+      <section class="section-band target-filter-band">
+        <div class="target-tag-tabs">
+          <button class="target-tag-chip ${ui.targetFilterTag === "__all" ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="__all">全部</button>
+          ${tags.map((tag) => `<button class="target-tag-chip ${ui.targetFilterTag === tag ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join("")}
+          ${ui.targetEditing ? `<button class="secondary-button target-tag-edit-button" type="button" data-action="edit-target-tags">编辑标签</button>` : ""}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTargetGroups(targets, tags) {
+    const visibleTags = ui.targetFilterTag === "__all" ? tags : [ui.targetFilterTag];
+    return visibleTags
+      .map((tag) => {
+        const items = targets.filter((target) => targetTag(target) === tag).sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)));
+        return renderTargetGroup(tag, items);
+      })
+      .join("");
+  }
+
+  function renderTargetGroup(tag, targets) {
+    const collapsed = ui.collapsedTargetTags.has(tag);
+    return `
+      <section class="target-category-group ${collapsed ? "collapsed" : ""}" data-target-tag="${escapeAttr(tag)}">
+        <button class="target-category-header" type="button" data-action="toggle-target-category" data-tag="${escapeAttr(tag)}" aria-label="展开或收起${escapeAttr(tag)}">
+          <span>${escapeHtml(tag)}</span>
+          <i>${collapsed ? "▸" : "▾"}</i>
+        </button>
+        ${collapsed ? "" : `<div class="target-category-list">${targets.length ? targets.map((target) => renderTarget(target)).join("") : `<p class="empty compact-empty">这个标签下还没有目标。</p>`}</div>`}
+      </section>
+    `;
+  }
+
   function renderTarget(target) {
     const progress = targetProgress(target);
     const done = isTaskDone(target);
@@ -683,17 +742,18 @@
               ${
                 ui.targetEditing
                   ? `<div class="row-actions">
-                      <button class="move-button" type="button" data-action="move-target" data-direction="-1" aria-label="上移">▴</button>
-                      <button class="move-button" type="button" data-action="move-target" data-direction="1" aria-label="下移">▾</button>
-                      <button class="secondary-button" type="button" data-action="migrate-target">迁移</button>
+                      <span class="move-stack">
+                        <button class="move-button" type="button" data-action="move-target" data-direction="-1" aria-label="上移">▴</button>
+                        <button class="move-button" type="button" data-action="move-target" data-direction="1" aria-label="下移">▾</button>
+                      </span>
                       <button class="secondary-button" type="button" data-action="edit-target">编辑</button>
                     </div>`
                   : ""
               }
             </div>
-            <p class="task-age">执行了 ${executionDays(target)} 天</p>
+            <p class="task-age">执行第 ${executionDays(target) + 1} 天</p>
             ${target.description ? `<p class="task-description">${escapeMultiline(target.description)}</p>` : ""}
-            ${target.hasProgress ? renderProgress(progress) : `<p class="task-meta">未开启进度条</p>`}
+            ${target.hasProgress ? renderProgress(progress) : ""}
           </div>
           <div class="button-row">
             ${target.hasProgress && !target.children?.length ? renderStepper(target.id, "", target.done || 0, target.total || 1) : ""}
@@ -731,14 +791,17 @@
         <input class="checkbox" type="checkbox" ${done ? "checked" : ""} data-action="toggle-subtask-done" aria-label="完成任务" />
         <div>
           <div class="subtask-name">${escapeHtml(item.name)}${item.hasProgress ? ` <span class="count-text">（${item.total || 1}）</span>` : ""}</div>
+          ${done && item.completedAt ? `<p class="task-completed-date">${shortDateText(item.completedAt)}完成</p>` : ""}
           ${item.description ? `<p class="task-description">${escapeMultiline(item.description)}</p>` : ""}
         </div>
         <div class="task-count-controls">
           ${item.hasProgress ? renderStepper(targetId, item.id, item.done || 0, item.total || 1) : ""}
           ${
             ui.targetEditing
-              ? `<button class="move-button" type="button" data-action="move-subtask" data-target-id="${targetId}" data-subtask-id="${item.id}" data-direction="-1" aria-label="上移">▴</button>
-                <button class="move-button" type="button" data-action="move-subtask" data-target-id="${targetId}" data-subtask-id="${item.id}" data-direction="1" aria-label="下移">▾</button>`
+              ? `<span class="move-stack">
+                  <button class="move-button" type="button" data-action="move-subtask" data-target-id="${targetId}" data-subtask-id="${item.id}" data-direction="-1" aria-label="上移">▴</button>
+                  <button class="move-button" type="button" data-action="move-subtask" data-target-id="${targetId}" data-subtask-id="${item.id}" data-direction="1" aria-label="下移">▾</button>
+                </span>`
               : ""
           }
         </div>
@@ -785,8 +848,10 @@
             ${
               ui.habitEditing
                 ? `<div class="button-row">
-                    <button class="move-button" type="button" data-action="move-habit" data-direction="-1" aria-label="上移">▴</button>
-                    <button class="move-button" type="button" data-action="move-habit" data-direction="1" aria-label="下移">▾</button>
+                    <span class="move-stack">
+                      <button class="move-button" type="button" data-action="move-habit" data-direction="-1" aria-label="上移">▴</button>
+                      <button class="move-button" type="button" data-action="move-habit" data-direction="1" aria-label="下移">▾</button>
+                    </span>
                     <button class="secondary-button" type="button" data-action="edit-habit">编辑</button>
                   </div>`
                 : ""
@@ -798,14 +863,42 @@
   }
 
   function renderReview() {
+    const activeScope = ["day", "week", "month"].includes(state.reviewScope) ? state.reviewScope : "day";
+    state.reviewScope = activeScope;
     $("#app").innerHTML = `
       <section class="view" data-view="review">
-        ${["day", "week", "month"].map(renderReviewScopeSection).join("")}
+        ${renderReviewTabs(activeScope)}
+        ${renderReviewScopeSection(activeScope)}
+      </section>
+    `;
+  }
+
+  function renderReviewTabs(activeScope) {
+    const scopes = [
+      ["day", "日复盘"],
+      ["week", "周复盘"],
+      ["month", "月复盘"],
+    ];
+    return `
+      <section class="section-band review-tab-panel">
+        <div class="review-tabs">
+          ${scopes
+            .map(
+              ([scope, label]) => `
+                <button class="toggle-button ${activeScope === scope ? "active" : ""}" type="button" data-action="set-review-scope" data-scope="${scope}">
+                  ${label}
+                </button>
+              `,
+            )
+            .join("")}
+        </div>
       </section>
     `;
   }
 
   function renderReviewScopeSection(scope) {
+    if (scope === "week") return renderWeeklyReviewSection();
+    if (scope === "month") return renderMonthlyReviewSection();
     const date = reviewDate(scope);
     const reviewItems = reviewsForScope(scope, date);
     return `
@@ -825,6 +918,322 @@
           ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, scope)).join("") : `<p class="empty">还没有复盘事项。</p>`}
         </div>
       </section>
+    `;
+  }
+
+  function renderWeeklyReviewSection() {
+    const scope = "week";
+    const date = reviewDate(scope);
+    const key = scopeKey(scope, date);
+    const review = weeklyReviewForKey(key);
+    return `
+      <section class="section-band review-scope-section weekly-review-section" data-review-scope="${scope}">
+        ${renderReviewNavigator(scope)}
+        <div class="section-title">
+          <div>
+            <h2>${reviewLabel(scope)}</h2>
+            <p class="hint">${scopeDisplay(scope, date)}</p>
+          </div>
+          <div class="button-row">
+            <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
+          </div>
+        </div>
+        ${renderWeeklyReviewSummary(date)}
+        ${renderStudyBreakdownCard(weeklyStudyBreakdown(date), "学习标签占比", "本周还没有学习记录。")}
+        ${renderWeeklyKeyEvents(date)}
+        ${ui.reviewEditing ? renderWeeklyReviewEditor(review, key) : renderWeeklyReviewDisplay(review)}
+      </section>
+    `;
+  }
+
+  function renderWeeklyReviewSummary(date) {
+    const study = weeklyStudySummary(date);
+    const work = weeklyWorkSummary(date);
+    return `
+      <div class="weekly-brief-summary">
+        ${renderWeeklyBriefLine("学习时长", study.total, study.recordedDays)}
+        ${renderWeeklyBriefLine("工位时长", work.total, work.recordedDays)}
+      </div>
+    `;
+  }
+
+  function renderWeeklyBriefLine(title, totalMinutes, recordedDays) {
+    const days = Math.max(0, recordedDays || 0);
+    const average = days ? totalMinutes / days : 0;
+    return `<p><strong>${title}：</strong>总时长${formatHourText(totalMinutes)}/日均${formatHourText(average)}</p>`;
+  }
+
+  function renderMonthlyReviewSection() {
+    const scope = "month";
+    const date = reviewDate(scope);
+    const key = scopeKey(scope, date);
+    const review = monthlyReviewForKey(key);
+    return `
+      <section class="section-band review-scope-section monthly-review-section" data-review-scope="${scope}">
+        ${renderReviewNavigator(scope)}
+        <div class="section-title">
+          <div>
+            <h2>${reviewLabel(scope)}</h2>
+            <p class="hint">${scopeDisplay(scope, date)}</p>
+          </div>
+          <div class="button-row">
+            <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
+          </div>
+        </div>
+        ${renderMonthlyStatsTable(date)}
+        ${renderStudyBreakdownCard(monthlyStudyBreakdown(date), "学习标签占比（月）", "本月还没有学习记录。")}
+        ${renderMonthlyReviewTabs()}
+        ${renderMonthlyReviewPanel(review, key, date)}
+      </section>
+    `;
+  }
+
+  function renderStudyBreakdownCard(breakdown, title, emptyText) {
+    if (!breakdown.total) {
+      return `
+        <section class="weekly-breakdown-card">
+          <h3>${escapeHtml(title)}</h3>
+          <p class="empty compact-empty">${escapeHtml(emptyText)}</p>
+        </section>
+      `;
+    }
+    return `
+      <section class="weekly-breakdown-card">
+        <h3>${escapeHtml(title)}</h3>
+        <div class="weekly-stacked-bar" aria-label="学习标签占比">
+          ${breakdown.entries
+            .map((entry) => `<span style="width:${entry.percent}%;background:${entry.color}" title="${escapeAttr(entry.label)} ${entry.percent}%"></span>`)
+            .join("")}
+        </div>
+        <div class="weekly-breakdown-legend">
+          ${breakdown.entries
+            .map(
+              (entry) => `
+                <span>
+                  <i class="color-dot" style="background:${entry.color}"></i>
+                  ${escapeHtml(entry.label)} ${entry.percent}%
+                </span>
+              `,
+            )
+            .join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderMonthlyStatsTable(date) {
+    const buckets = monthWeekBuckets(date);
+    return `
+      <section class="monthly-table-card">
+        <table class="monthly-stats-table">
+          <thead>
+            <tr>
+              <th>周次</th>
+              <th>学习时长（日均）</th>
+              <th>工位时长（日均）</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${buckets
+              .map((bucket, index) => {
+                const study = studySummaryForDates(bucket.dates);
+                const work = workSummaryForDates(bucket.dates);
+                const studyAverage = study.recordedDays ? study.total / study.recordedDays : 0;
+                const workAverage = work.recordedDays ? work.total / work.recordedDays : 0;
+                return `
+                  <tr>
+                    <td>第${index + 1}周</td>
+                    <td>${formatHourText(study.total)}（${formatHourText(studyAverage)}）</td>
+                    <td>${formatHourText(work.total)}（${formatHourText(workAverage)}）</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </section>
+    `;
+  }
+
+  function renderMonthlyReviewTabs() {
+    const items = [
+      ["red", "红灯"],
+      ["green", "绿灯"],
+      ["summary", "总结"],
+    ];
+    return `
+      <div class="month-review-tabs">
+        ${items
+          .map(([mode, label]) => `<button class="toggle-button ${ui.monthReviewMode === mode ? "active" : ""}" type="button" data-action="set-month-review-mode" data-mode="${mode}">${label}</button>`)
+          .join("")}
+      </div>
+    `;
+  }
+
+  function renderWeeklyKeyEvents(date) {
+    const events = keyEventsForDates(datesInScope("week", date));
+    return `
+      <section class="monthly-key-card">
+        <div class="weekly-card-title">
+          <i class="weekly-icon amber"></i>
+          <strong>本周关键事件</strong>
+          <span>来自日复盘星标，默认只显示日期和现象，点按可展开原因和措施。</span>
+        </div>
+        ${
+          events.length
+            ? `<div class="monthly-key-list">${events.map(renderMonthlyKeyEvent).join("")}</div>`
+            : `<p class="empty compact-empty">本周还没有星标关键事件。</p>`
+        }
+      </section>
+    `;
+  }
+
+  function renderMonthlyKeyEvent(event) {
+    const expanded = ui.expandedKeyEvents.has(event.key);
+    return `
+      <article class="monthly-key-event ${expanded ? "expanded" : ""}">
+        <button class="monthly-key-event-head" type="button" data-action="toggle-key-event-detail" data-key-event-id="${escapeAttr(event.key)}">
+          <span><strong>${escapeHtml(shortDateText(event.date))}</strong>${escapeHtml(event.phenomenon || "还没有写现象")}</span>
+          <i>${expanded ? "▴" : "▾"}</i>
+        </button>
+        ${expanded ? renderMonthlyKeyEventDetails(event) : ""}
+      </article>
+    `;
+  }
+
+  function renderMonthlyKeyEventDetails(event) {
+    if (!event.reasons.length) return `<p class="review-text monthly-key-detail">还没有写原因和措施。</p>`;
+    return `
+      <div class="monthly-key-detail">
+        ${event.reasons
+          .map(
+            (reason, index) => `
+              <div class="review-reason">
+                <div class="entry-display-line muted-line"><span class="review-label reason-label"><i></i><strong>原因${index + 1}</strong></span></div>
+                <p class="review-text">${reason.text ? escapeMultiline(reason.text) : "还没有写原因"}</p>
+                ${reason.measure ? `<div class="entry-display-line muted-line"><span class="review-label measure-label"><i></i><strong>措施</strong></span></div><p class="review-text">${escapeMultiline(reason.measure)}</p>` : ""}
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  }
+
+  function renderMonthlyReviewPanel(review, key, date) {
+    if (ui.monthReviewMode === "summary") return renderMonthlySummaryPanel(review, key);
+    const mode = ui.monthReviewMode === "green" ? "green" : "red";
+    const title = mode === "red" ? "红灯情况说明" : "绿灯情况说明";
+    const description =
+      mode === "red"
+        ? "红灯指向的是同一个事件还是多个？有没有进行针对性调整？本月核心瓶颈是什么？"
+        : "这些做得好的事情有什么共同原因吗？有没有什么可复用的地方？";
+    const field = mode === "red" ? "redInsight" : "greenInsight";
+    return `
+      ${renderMonthlyLightList(mode, date)}
+      ${renderMonthlyInsightCard(mode, title, description, field, review[field], key)}
+    `;
+  }
+
+  function renderMonthlyLightList(mode, date) {
+    const label = mode === "red" ? "红灯" : "绿灯";
+    const buckets = monthWeekBuckets(date);
+    return `
+      <div class="monthly-light-list">
+        ${buckets
+          .map((bucket, index) => {
+            const weeklyReview = readWeeklyReviewForKey(bucket.key);
+            const value = weeklyReview[mode] || "";
+            return `
+              <article class="monthly-light-item ${mode}">
+                <strong>第${index + 1}周 · ${label}</strong>
+                <p class="review-text">${value ? escapeMultiline(value) : `这一周还没有填写${label}`}</p>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    `;
+  }
+
+  function renderMonthlySummaryPanel(review, key) {
+    return `
+      <div class="monthly-summary-stack">
+        ${renderMonthlyInsightCard("red", "红灯情况说明", "红灯指向的是同一个事件还是多个？有没有进行针对性调整？本月核心瓶颈是什么？", "redInsight", review.redInsight, key)}
+        ${renderMonthlyInsightCard("green", "绿灯情况说明", "这些做得好的事情有什么共同原因吗？有没有什么可复用的地方？", "greenInsight", review.greenInsight, key)}
+        <section class="monthly-next-card">
+          <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下月拟改进</strong></div>
+          ${renderMonthlyTextField("下月拟改进的方向", "nextDirection", review.nextDirection, key, "下个月最想优先调整或推进的方向")}
+        </section>
+      </div>
+    `;
+  }
+
+  function renderMonthlyInsightCard(tone, title, description, field, value, key) {
+    return `
+      <section class="monthly-insight-card ${tone}">
+        <div class="weekly-card-title">
+          <i class="weekly-icon ${tone}"></i>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(description)}</span>
+        </div>
+        ${renderMonthlyTextField("", field, value, key, description)}
+      </section>
+    `;
+  }
+
+  function renderMonthlyTextField(label, field, value, key, placeholder) {
+    if (ui.reviewEditing) {
+      return `
+        <label class="form-row monthly-text-field">
+          ${label ? `<span class="field-label">${escapeHtml(label)}</span>` : ""}
+          <textarea rows="${textareaRows(value)}" data-action="update-month-review" data-month-review-key="${escapeAttr(key)}" data-field="${escapeAttr(field)}" placeholder="${escapeAttr(placeholder)}">${escapeHtml(value || "")}</textarea>
+        </label>
+      `;
+    }
+    return `<p class="review-text">${value ? escapeMultiline(value) : "还没有填写"}</p>`;
+  }
+
+  function renderWeeklyReviewDisplay(review) {
+    return `
+      <h3 class="weekly-section-heading">红绿灯自评</h3>
+      <div class="weekly-reflection-grid">
+        ${renderWeeklyReflectionCard("red", "红灯", "本周感到挫败和消耗能量的事", review.red)}
+        ${renderWeeklyReflectionCard("green", "绿灯", "本周最有成就感/最顺利的事", review.green)}
+      </div>
+      <section class="weekly-next-card">
+        <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下周拟改进</strong></div>
+        <p class="review-text">${review.nextDirection ? escapeMultiline(review.nextDirection) : "还没有写下周拟改进的方向"}</p>
+      </section>
+    `;
+  }
+
+  function renderWeeklyReflectionCard(tone, title, subtitle, value) {
+    return `
+      <section class="weekly-reflection-card ${tone}">
+        <div class="weekly-card-title"><i class="weekly-icon ${tone}"></i><strong>${title}</strong><span>${subtitle}</span></div>
+        <p class="review-text">${value ? escapeMultiline(value) : "还没有填写"}</p>
+      </section>
+    `;
+  }
+
+  function renderWeeklyReviewEditor(review, key) {
+    return `
+      <div class="weekly-review-editor" data-weekly-review-key="${escapeAttr(key)}">
+        <h3 class="weekly-section-heading">红绿灯自评</h3>
+        <label class="form-row">
+          <span class="field-label red-field">红灯：本周感到挫败和消耗能量的事</span>
+          <textarea rows="${textareaRows(review.red)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="red" placeholder="写下本周让你挫败、卡住、消耗能量的事情">${escapeHtml(review.red || "")}</textarea>
+        </label>
+        <label class="form-row">
+          <span class="field-label green-field">绿灯：本周最有成就感/最顺利的事</span>
+          <textarea rows="${textareaRows(review.green)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="green" placeholder="写下本周最顺利、最有成就感的事情">${escapeHtml(review.green || "")}</textarea>
+        </label>
+        <label class="form-row">
+          <span class="field-label blue-field">下周拟改进的方向</span>
+          <textarea rows="${textareaRows(review.nextDirection)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="nextDirection" placeholder="下周想优先调整或推进的方向">${escapeHtml(review.nextDirection || "")}</textarea>
+        </label>
+      </div>
     `;
   }
 
@@ -849,10 +1258,12 @@
       <span class="plan-pill" data-plan-index="${index}">
         ${escapeHtml(plan)}
         ${
-          ui.plansEditing
-            ? `
-              <button class="move-button" type="button" data-action="move-plan" data-direction="-1" aria-label="上移">▴</button>
-              <button class="move-button" type="button" data-action="move-plan" data-direction="1" aria-label="下移">▾</button>
+              ui.plansEditing
+                ? `
+              <span class="move-stack">
+                <button class="move-button" type="button" data-action="move-plan" data-direction="-1" aria-label="上移">▴</button>
+                <button class="move-button" type="button" data-action="move-plan" data-direction="1" aria-label="下移">▾</button>
+              </span>
               <button class="ghost-button" type="button" data-action="edit-plan" aria-label="编辑规划">编辑</button>
               <button class="icon-button danger-icon small-icon" type="button" data-action="delete-plan" aria-label="删除规划">×</button>
             `
@@ -874,11 +1285,14 @@
             ${
               ui.reviewEditing
                 ? `<div class="row-actions">
-                    <button class="move-button" type="button" data-action="move-review-item" data-direction="-1" aria-label="上移">▴</button>
-                    <button class="move-button" type="button" data-action="move-review-item" data-direction="1" aria-label="下移">▾</button>
+                    ${renderReviewStarControl(review, scope)}
+                    <span class="move-stack">
+                      <button class="move-button" type="button" data-action="move-review-item" data-direction="-1" aria-label="上移">▴</button>
+                      <button class="move-button" type="button" data-action="move-review-item" data-direction="1" aria-label="下移">▾</button>
+                    </span>
                     <button class="ghost-button compact-action" type="button" data-action="edit-review-item">编辑</button>
                   </div>`
-                : ""
+                : renderReviewStarControl(review, scope)
             }
           </div>
           <p class="review-text">${review.phenomenon ? escapeMultiline(review.phenomenon) : "还没有写现象"}</p>
@@ -891,7 +1305,7 @@
     return `
       <article class="review-item editing-review-item" data-review-id="${review.id}" data-review-scope="${scope}">
         <label class="form-row">
-          <span class="field-label">现象${index + 1}</span>
+          <span class="field-label review-edit-label">现象${index + 1}${renderReviewStarControl(review, scope)}</span>
           <textarea rows="${textareaRows(review.phenomenon)}" data-action="update-review-item" data-field="phenomenon" placeholder="${placeholders.phenomenon}">${escapeHtml(review.phenomenon || "")}</textarea>
         </label>
         <div class="review-reason-editor">
@@ -904,6 +1318,14 @@
         </div>
       </article>
     `;
+  }
+
+  function renderReviewStarControl(review, scope) {
+    if (scope !== "day") return "";
+    if (!ui.reviewEditing && !review.starred) return "";
+    const label = review.starred ? "取消关键事件标记" : "标记为关键事件";
+    if (!ui.reviewEditing) return `<span class="review-star active" aria-label="关键事件">★</span>`;
+    return `<button class="review-star ${review.starred ? "active" : ""}" type="button" data-action="toggle-review-star" aria-label="${label}">${review.starred ? "★" : "☆"}</button>`;
   }
 
   function renderReasonDisplay(reason, index) {
@@ -1046,6 +1468,29 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.4": {
+        updatedAt: "2026-06-28",
+        items: [
+          "目标页新增分类标签栏，支持全部/单标签筛选和标签分组收起。",
+          "目标大编辑状态下新增目标标签管理入口，可新增、重命名和删除标签。",
+          "目标编辑支持设置目标标签，并在母任务下方提供新增二级和标签入口。",
+          "目标迁移改为全局迁移今日未完成目标到第二天，保留原目标进度。",
+          "迁移后的目标会标注已完成子任务的完成日期。",
+          "迁移后的目标会持续同步源日期的未完成目标，源目标完成后会自动从次日移除。",
+          "目标标签支持自定义排序，“未分类”固定显示在最后且不作为母任务标签候选项。",
+          "目标标签编辑支持设置默认标签，新增目标未手动选择标签时会自动归入默认标签。",
+          "周复盘改为学习/工位时长摘要、学习标签占比、红绿灯自评和下周改进措施结构。",
+          "复盘页改为日、周、月顶部页签切换，周复盘时长摘要压缩为两行。",
+          "月复盘新增周次统计表、月度学习标签占比、红绿灯逐周展开和月度总结结构。",
+          "日复盘支持给现象标记关键事件，周复盘可汇总并展开星标事件的原因和措施。",
+          "月复盘周次按本月 1 号所在周起算，跨月周只归属到一个月度复盘。",
+          "周/月复盘的拟改进区域改为只填写方向，去掉对应措施输入。",
+          "目标卡片移除单个迁移按钮，迁移入口移动到目标总编辑按钮旁边。",
+          "目标执行天数文案改为“执行第 x 天”。",
+          "上下移动按钮统一改为上下竖排布局，减少横向占用。",
+          "目标编辑弹窗中母任务删除按钮移动到顶部加号左侧，二级/三级新增按钮文案更清晰。",
+        ],
+      },
       "v1.3": {
         updatedAt: "2026-06-27",
         items: [
@@ -1542,19 +1987,106 @@
     `;
   }
 
+  function openTargetTagsModal() {
+    openModal("编辑目标标签", renderTargetTagEditor(), (backdrop) => {
+      backdrop.addEventListener("click", (event) => {
+        const action = event.target.dataset.modalAction;
+        if (action === "add-target-tag-row") {
+          const list = $("[data-target-tag-list]", backdrop);
+          list.insertAdjacentHTML("beforeend", renderTargetTagRow(""));
+          return;
+        }
+        if (action === "delete-target-tag-row") {
+          event.target.closest("[data-target-tag-row]")?.remove();
+          return;
+        }
+        if (action === "move-target-tag-row") {
+          const row = event.target.closest("[data-target-tag-row]");
+          const direction = Number(event.target.dataset.direction) || 0;
+          if (!row) return;
+          if (direction < 0 && row.previousElementSibling) row.parentElement.insertBefore(row, row.previousElementSibling);
+          if (direction > 0 && row.nextElementSibling) row.parentElement.insertBefore(row.nextElementSibling, row);
+          return;
+        }
+        if (action === "save-target-tags") {
+          const rows = $$("[data-target-tag-row]", backdrop);
+          const nextTags = rows
+            .map((row) => $("[data-target-tag-field]", row).value.trim())
+            .filter((tag) => tag && tag !== "未分类");
+          const uniqueTags = orderTargetTags(nextTags);
+          const defaultRadio = $("[data-target-default-radio]:checked", backdrop);
+          const defaultRow = defaultRadio?.closest("[data-target-tag-row]");
+          const selectedDefault = defaultRow ? $("[data-target-tag-field]", defaultRow).value.trim() : defaultRadio?.dataset.defaultTag;
+          const nextDefaultTag = normalizedTargetDefaultTag(selectedDefault, uniqueTags);
+          const renameMap = new Map();
+          rows.forEach((row) => {
+            const original = row.dataset.originalTag;
+            const next = $("[data-target-tag-field]", row).value.trim();
+            if (original && original !== next) renameMap.set(original, next || "未分类");
+          });
+          const keptOriginals = new Set(rows.map((row) => row.dataset.originalTag).filter(Boolean));
+          setState((draft) => {
+            draft.settings.targetTags = uniqueTags;
+            draft.settings.targetDefaultTag = nextDefaultTag;
+            renameTargetTags(draft, renameMap, keptOriginals);
+            draft.settings.targetDefaultTag = normalizedTargetDefaultTag(draft.settings.targetDefaultTag, draft.settings.targetTags);
+          });
+          closeModal();
+        }
+      });
+    });
+  }
+
+  function renderTargetTagEditor() {
+    const editableTags = targetTagList().filter((tag) => tag !== "未分类");
+    const defaultTag = defaultTargetTag();
+    return `
+      <p class="hint">删除标签后，使用该标签的目标会归入“未分类”。</p>
+      <div class="target-tag-editor-list" data-target-tag-list>
+        ${editableTags.map((tag) => renderTargetTagRow(tag, defaultTag)).join("")}
+      </div>
+      <div class="target-tag-row fixed-target-tag-row">
+        <input class="target-default-radio" type="radio" name="target-default-tag" data-target-default-radio data-default-tag="未分类" ${defaultTag === "未分类" ? "checked" : ""} aria-label="设为默认标签" />
+        <input value="未分类" disabled aria-label="默认标签" />
+        <span class="hint">默认</span>
+      </div>
+      <div class="button-row">
+        <button class="secondary-button" type="button" data-modal-action="add-target-tag-row">新增标签</button>
+        <button class="primary-button" type="button" data-modal-action="save-target-tags">保存标签</button>
+      </div>
+    `;
+  }
+
+  function renderTargetTagRow(tag, defaultTag = defaultTargetTag()) {
+    return `
+      <div class="target-tag-row" data-target-tag-row data-original-tag="${escapeAttr(tag)}">
+        <input class="target-default-radio" type="radio" name="target-default-tag" data-target-default-radio ${defaultTag === tag ? "checked" : ""} aria-label="设为默认标签" />
+        <input data-target-tag-field value="${escapeAttr(tag)}" placeholder="标签名" />
+        <div class="target-tag-row-actions">
+          <div class="move-stack" aria-label="调整标签顺序">
+            <button class="move-button" type="button" data-modal-action="move-target-tag-row" data-direction="-1" aria-label="上移标签">▲</button>
+            <button class="move-button" type="button" data-modal-action="move-target-tag-row" data-direction="1" aria-label="下移标签">▼</button>
+          </div>
+          <button class="danger-button" type="button" data-modal-action="delete-target-tag-row">删除</button>
+        </div>
+      </div>
+    `;
+  }
+
   function openTargetModal(existingTarget = null) {
     const isEdit = Boolean(existingTarget);
     const children = existingTarget?.children?.length ? existingTarget.children : [];
+    const targetTagValue = targetTag(existingTarget);
     openModal(
       isEdit ? "编辑目标" : "新增目标",
       `
         <section class="target-tree-editor">
-          <div class="compact-form-row target-progress-row">
+          <div class="target-progress-row">
             <label class="check-inline">
               <input id="target-progress" class="checkbox" type="checkbox" ${existingTarget?.hasProgress !== false ? "checked" : ""} />
               进度条
             </label>
-            <button class="secondary-button square-add-button" type="button" data-modal-action="add-child-row" aria-label="新增二级任务">+</button>
+            ${isEdit ? `<button class="danger-button target-delete-inline" type="button" data-modal-action="delete-target-modal">删除</button>` : ""}
           </div>
           <div class="task-edit-node level-1 parent-node ${existingTarget?.description ? "show-description" : ""}">
             <div class="task-edit-line">
@@ -1565,12 +2097,22 @@
             </div>
             <textarea id="target-description" class="task-description-input" rows="${textareaRows(existingTarget?.description)}" placeholder="可选，一句话描述">${escapeHtml(existingTarget?.description || "")}</textarea>
             <p class="hint">有二级任务时，进度按二级/三级任务数量计算，不再计算母任务数量。</p>
+            <div class="task-node-actions parent-node-actions">
+              <button class="secondary-button text-add-button" type="button" data-modal-action="add-child-row">新增二级</button>
+              <button class="secondary-button text-add-button" type="button" data-modal-action="toggle-target-tag">标签</button>
+            </div>
+            <label class="target-tag-editor ${targetTagValue !== "未分类" ? "show-target-tag" : ""}">
+              <span class="field-label">目标标签</span>
+              <input id="target-tag" list="target-tag-options" value="${escapeAttr(targetTagValue === "未分类" ? "" : targetTagValue)}" placeholder="例如：论文、英语、运动" />
+              <datalist id="target-tag-options">
+                ${targetTagList(targetsForCurrentScope()).filter((tag) => tag !== "未分类").map((tag) => `<option value="${escapeAttr(tag)}"></option>`).join("")}
+              </datalist>
+            </label>
           </div>
           <div id="child-editor" class="task-tree-children">
             ${children.length ? children.map(renderChildEditor).join("") : renderChildEditor()}
           </div>
         </section>
-        ${isEdit ? `<button class="icon-button danger-icon modal-delete" type="button" data-modal-action="delete-target-modal" aria-label="删除目标">×</button>` : ""}
         <div class="button-row">
           <button class="primary-button" type="button" data-modal-action="save-target">${isEdit ? "保存" : "创建"}</button>
         </div>
@@ -1586,6 +2128,9 @@
           }
           if (action === "toggle-task-description") {
             event.target.closest(".task-edit-node")?.classList.toggle("show-description");
+          }
+          if (action === "toggle-target-tag") {
+            $(".target-tag-editor", backdrop)?.classList.toggle("show-target-tag");
           }
           if (action === "delete-grandchild-row") {
             const row = event.target.closest("[data-grandchild-row]");
@@ -1630,7 +2175,7 @@
         </div>
         <textarea class="task-description-input" data-child-field="description" rows="${textareaRows(child?.description)}" placeholder="可选，一句话描述">${escapeHtml(child?.description || "")}</textarea>
         <div class="task-node-actions">
-          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增</button>
+          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增三级</button>
           <button class="danger-button" type="button" data-modal-action="delete-child-row" aria-label="删除二级任务">删除</button>
         </div>
         <div class="task-tree-children" data-grandchild-editor>
@@ -1651,7 +2196,7 @@
         </div>
         <textarea class="task-description-input" data-grandchild-field="description" rows="${textareaRows(grandchild?.description)}" placeholder="可选，一句话描述">${escapeHtml(grandchild?.description || "")}</textarea>
         <div class="task-node-actions">
-          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增</button>
+          <button class="secondary-button add-button text-add-button" type="button" data-modal-action="add-grandchild-row" aria-label="新增三级任务">新增三级</button>
           <button class="danger-button" type="button" data-modal-action="delete-grandchild-row" aria-label="删除三级任务">删除</button>
         </div>
       </section>
@@ -1679,6 +2224,7 @@
               hasProgress: true,
               total: childTotal,
               done: Math.min(existing?.done || 0, childTotal),
+              completedAt: existing?.completedAt || "",
               children: [],
             };
           })
@@ -1690,19 +2236,24 @@
           hasProgress: true,
           total,
           done: Math.min(existingChild?.done || 0, total),
+          completedAt: existingChild?.completedAt || "",
           children: grandchildren,
         };
       })
       .filter(Boolean);
 
     const total = Math.max(1, Number($("#target-total", backdrop).value) || 1);
+    const rawTag = $("#target-tag", backdrop)?.value.trim() || "";
+    const fallbackTag = existingTarget ? "未分类" : defaultTargetTag();
     return {
       id: existingTarget?.id || uid(),
       name: $("#target-name", backdrop).value.trim() || "未命名目标",
+      tag: rawTag && rawTag !== "未分类" ? rawTag : fallbackTag,
       description: $("#target-description", backdrop).value.trim(),
       hasProgress: $("#target-progress", backdrop).checked,
       total,
       done: Math.min(existingTarget?.done || 0, total),
+      completedAt: existingTarget?.completedAt || "",
       startedAt: existingTarget?.startedAt || dateKey(),
       collapsed: existingTarget?.collapsed ?? true,
       children,
@@ -1886,7 +2437,10 @@
     if (action === "move-log") return moveLog(actionNode.closest("[data-log-id]").dataset.logId, Number(actionNode.dataset.direction));
     if (action === "set-target-scope") return setState((draft) => (draft.targetScope = actionNode.dataset.scope));
     if (action === "add-target") return openTargetModal();
-    if (action === "migrate-target") return migrateTarget(actionNode.closest("[data-target-id]").dataset.targetId);
+    if (action === "set-target-filter") return setTargetFilter(actionNode.dataset.tag);
+    if (action === "toggle-target-category") return toggleTargetCategory(actionNode.dataset.tag);
+    if (action === "edit-target-tags") return openTargetTagsModal();
+    if (action === "migrate-incomplete-targets") return migrateIncompleteTargets();
     if (action === "toggle-target") return toggleTarget(actionNode.closest("[data-target-id]").dataset.targetId);
     if (action === "edit-target") return openTargetModal(getTarget(actionNode.closest("[data-target-id]").dataset.targetId));
     if (action === "delete-target") return confirmDelete("确认要删除这个目标吗？", () => deleteTarget(actionNode.closest("[data-target-id]").dataset.targetId));
@@ -1899,6 +2453,8 @@
     if (action === "move-habit") return moveHabit(actionNode.closest("[data-habit-id]").dataset.habitId, Number(actionNode.dataset.direction));
     if (action === "open-habit-calendar") return openHabitCalendar(getHabit(actionNode.closest("[data-habit-id]").dataset.habitId));
     if (action === "set-review-scope") return setState((draft) => (draft.reviewScope = actionNode.dataset.scope));
+    if (action === "set-month-review-mode") return setMonthReviewMode(actionNode.dataset.mode);
+    if (action === "toggle-key-event-detail") return toggleKeyEventDetail(actionNode.dataset.keyEventId);
     if (action === "shift-review-date") return shiftReviewDate(actionNode.dataset.reviewScope, Number(actionNode.dataset.direction) || 0);
     if (action === "add-plan") return openPlanModal();
     if (action === "toggle-plan-edit") return togglePlanEdit();
@@ -1908,6 +2464,7 @@
     if (action === "add-review-item") return addReviewItem(reviewScopeFromNode(actionNode));
     if (action === "add-review-reason") return addReviewReason(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId);
     if (action === "delete-review-reason") return confirmDelete("确认要删除这个原因吗？", () => deleteReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId));
+    if (action === "toggle-review-star") return toggleReviewStar(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId);
     if (action === "edit-review-item") return editReviewItem(actionNode.closest("[data-review-id]").dataset.reviewId);
     if (action === "save-review-item") return saveReviewItem(actionNode.closest("[data-review-id]"));
     if (action === "delete-review-item") return confirmDelete("确认要删除这条复盘吗？", () => deleteReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId));
@@ -1923,6 +2480,8 @@
     if (action === "update-habit") updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, false);
     if (action === "update-review-item") updateReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
     if (action === "update-review-reason") updateReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
+    if (action === "update-week-review") updateWeeklyReviewField(actionNode.dataset.weeklyReviewKey, actionNode.dataset.field, actionNode.value);
+    if (action === "update-month-review") updateMonthlyReviewField(actionNode.dataset.monthReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "set-review-date") setReviewDate(actionNode.value);
     if (action === "set-scope-date") setScopeDate(actionNode.dataset.owner, actionNode.dataset.scope, actionNode.value);
     if (action === "set-review-scope-date") setReviewScopeDate(actionNode.dataset.reviewScope, actionNode.value);
@@ -2128,6 +2687,19 @@
     render();
   }
 
+  function setMonthReviewMode(mode) {
+    if (!["red", "green", "summary"].includes(mode)) return;
+    ui.monthReviewMode = mode;
+    render();
+  }
+
+  function toggleKeyEventDetail(key) {
+    if (!key) return;
+    if (ui.expandedKeyEvents.has(key)) ui.expandedKeyEvents.delete(key);
+    else ui.expandedKeyEvents.add(key);
+    render();
+  }
+
   function updateLog(logId, field, value, shouldRender = true) {
     const log = ui.logDrafts.get(logId);
     if (!log) return;
@@ -2188,6 +2760,19 @@
     });
   }
 
+  function setTargetFilter(tag) {
+    ui.targetFilterTag = tag || "__all";
+    if (tag && tag !== "__all") ui.collapsedTargetTags.delete(tag);
+    render();
+  }
+
+  function toggleTargetCategory(tag) {
+    if (!tag) return;
+    if (ui.collapsedTargetTags.has(tag)) ui.collapsedTargetTags.delete(tag);
+    else ui.collapsedTargetTags.add(tag);
+    render();
+  }
+
   function deleteTarget(targetId) {
     setState((draft) => {
       const list = targetsForScopeDraft(draft, state.targetScope, scopeKey(state.targetScope));
@@ -2211,6 +2796,21 @@
     alert(`已将“${source.name || "未命名目标"}”迁移到 ${scopeDisplay(state.targetScope, targetDate)}。`);
   }
 
+  function migrateIncompleteTargets() {
+    const sourceDate = dateKey();
+    const sources = targetsForCurrentScope().filter((target) => !isTaskDone(target));
+    if (!sources.length) {
+      alert("今日没有需要迁移的未完成目标。");
+      return;
+    }
+    const targetDate = nextScopeDate("day", sourceDate);
+    setState((draft) => {
+      draft.targetMigrations ||= {};
+      draft.targetMigrations[sourceDate] = { targetDate };
+    });
+    alert(`已将 ${sources.length} 个未完成目标迁移到 ${scopeDisplay("day", targetDate)}。`);
+  }
+
   function nextScopeDate(scope, date) {
     const next = new Date(`${date}T00:00:00`);
     if (scope === "day") next.setDate(next.getDate() + 1);
@@ -2219,21 +2819,46 @@
     return isoFromDate(next);
   }
 
-  function cloneTargetForMigration(target) {
+  function syncTargetMigration(draft, sourceDate) {
+    if (!sourceDate) return;
+    draft.targetMigrations ||= {};
+    const migration = draft.targetMigrations[sourceDate];
+    if (!migration) return;
+    const targetDate = migration.targetDate || nextScopeDate("day", sourceDate);
+    migration.targetDate = targetDate;
+    const sourceKey = scopeKey("day", sourceDate);
+    const targetKey = scopeKey("day", targetDate);
+    const sourceList = targetsForScopeDraft(draft, "day", sourceKey);
+    const targetList = targetsForScopeDraft(draft, "day", targetKey);
+    for (let index = targetList.length - 1; index >= 0; index -= 1) {
+      if (targetList[index]?.migration?.sourceDate === sourceDate) targetList.splice(index, 1);
+    }
+    sourceList.filter((target) => !isTaskDone(target)).forEach((target) => {
+      targetList.push(cloneTargetForMigration(target, sourceDate));
+    });
+  }
+
+  function cloneTargetForMigration(target, completedDate = dateKey()) {
     return {
       ...structuredClone(target),
       id: uid(),
-      startedAt: target.startedAt || dateKey(),
+      startedAt: target.startedAt || completedDate,
       collapsed: true,
-      children: (target.children || []).map(cloneSubtaskForMigration),
+      migration: {
+        sourceDate: completedDate,
+        sourceTargetId: target.id,
+      },
+      children: (target.children || []).map((item) => cloneSubtaskForMigration(item, completedDate)),
     };
   }
 
-  function cloneSubtaskForMigration(item) {
+  function cloneSubtaskForMigration(item, completedDate = dateKey()) {
+    const done = isSubtaskDone(item);
     return {
       ...structuredClone(item),
       id: uid(),
-      children: (item.children || []).map(cloneSubtaskForMigration),
+      completedAt: done ? item.completedAt || completedDate : item.completedAt || "",
+      children: (item.children || []).map((child) => cloneSubtaskForMigration(child, completedDate)),
     };
   }
 
@@ -2243,6 +2868,8 @@
       const item = subtaskId ? findChild(target, subtaskId) : target;
       if (!item) return;
       item.done = clamp((item.done || 0) + delta, 0, item.total || 1);
+      if (item.done >= (item.total || 1)) item.completedAt = item.completedAt || dateKey();
+      else item.completedAt = "";
     });
   }
 
@@ -2252,8 +2879,10 @@
       const item = findChild(target, subtaskId);
       if (!item) return;
       item.done = checked ? item.total || 1 : 0;
+      item.completedAt = checked ? item.completedAt || dateKey() : "";
       (item.children || []).forEach((child) => {
         child.done = checked ? child.total || 1 : 0;
+        child.completedAt = checked ? child.completedAt || dateKey() : "";
       });
     });
   }
@@ -2329,7 +2958,7 @@
     ui.editingReviews.add(id);
     setState((draft) => {
       const list = reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope)));
-      list.push({ id, phenomenon: "", reasons: [{ id: uid(), text: "", measure: "" }] });
+      list.push({ id, phenomenon: "", starred: false, reasons: [{ id: uid(), text: "", measure: "" }] });
     });
   }
 
@@ -2365,6 +2994,28 @@
     const reason = item?.reasons?.find((entry) => entry.id === reasonId);
     if (!reason) return;
     reason[field] = value;
+    saveState();
+  }
+
+  function toggleReviewStar(scope, itemId) {
+    if (scope !== "day") return;
+    setState(() => {
+      const item = reviewsForScope("day", reviewDate("day")).find((review) => review.id === itemId);
+      if (item) item.starred = !item.starred;
+    });
+  }
+
+  function updateWeeklyReviewField(key, field, value) {
+    if (!["red", "green", "nextDirection"].includes(field)) return;
+    const review = weeklyReviewForKey(key || scopeKey("week", reviewDate("week")));
+    review[field] = value;
+    saveState();
+  }
+
+  function updateMonthlyReviewField(key, field, value) {
+    if (!["redInsight", "greenInsight", "nextDirection"].includes(field)) return;
+    const review = monthlyReviewForKey(key || scopeKey("month", reviewDate("month")));
+    review[field] = value;
     saveState();
   }
 
@@ -2529,6 +3180,152 @@
     return total ? Math.round((completed / total) * 100) : 0;
   }
 
+  function weeklyReviewForKey(key) {
+    state.weeklyReviews ||= {};
+    state.weeklyReviews[key] = normalizeWeeklyReview(state.weeklyReviews[key]);
+    return state.weeklyReviews[key];
+  }
+
+  function readWeeklyReviewForKey(key) {
+    return normalizeWeeklyReview(state.weeklyReviews?.[key] || {});
+  }
+
+  function normalizeWeeklyReview(review = {}) {
+    return {
+      red: review.red || "",
+      green: review.green || "",
+      nextDirection: review.nextDirection || review.direction || "",
+    };
+  }
+
+  function monthlyReviewForKey(key) {
+    state.monthlyReviews ||= {};
+    state.monthlyReviews[key] = normalizeMonthlyReview(state.monthlyReviews[key]);
+    return state.monthlyReviews[key];
+  }
+
+  function normalizeMonthlyReview(review = {}) {
+    return {
+      redInsight: review.redInsight || review.red || "",
+      greenInsight: review.greenInsight || review.green || "",
+      nextDirection: review.nextDirection || review.direction || "",
+    };
+  }
+
+  function weeklyStudySummary(date) {
+    return studySummaryForDates(datesInScope("week", date));
+  }
+
+  function weeklyWorkSummary(date) {
+    return workSummaryForDates(datesInScope("week", date));
+  }
+
+  function weeklyStudyBreakdown(date) {
+    return studyBreakdownForDates(datesInScope("week", date));
+  }
+
+  function monthlyStudyBreakdown(date) {
+    return studyBreakdownForDates(datesInScope("month", date));
+  }
+
+  function studySummaryForDates(dates) {
+    const studyTag = getStudyTag();
+    if (!studyTag) return { total: 0, recordedDays: 0 };
+    return dates.reduce(
+      (acc, itemDate) => {
+        const logs = state.logs[itemDate] || [];
+        const hasAnyRecord = logs.some((entry) => Number(entry.minutes) > 0);
+        if (hasAnyRecord) acc.recordedDays += 1;
+        acc.total += logs
+          .filter((entry) => entry.tagId === studyTag.id)
+          .reduce((sum, entry) => sum + (Number(entry.minutes) || 0), 0);
+        return acc;
+      },
+      { total: 0, recordedDays: 0 },
+    );
+  }
+
+  function workSummaryForDates(dates) {
+    return dates.reduce(
+      (acc, itemDate) => {
+        if (hasCompleteLocationRecord(itemDate)) acc.recordedDays += 1;
+        acc.total += locationTotalsForDay(itemDate).__loc_work || 0;
+        return acc;
+      },
+      { total: 0, recordedDays: 0 },
+    );
+  }
+
+  function studyBreakdownForDates(dates) {
+    const studyTag = getStudyTag();
+    if (!studyTag) return { total: 0, entries: [] };
+    const totals = new Map();
+    dates.forEach((itemDate) => {
+      (state.logs[itemDate] || [])
+        .filter((entry) => entry.tagId === studyTag.id && Number(entry.minutes) > 0)
+        .forEach((entry) => {
+          const label = entry.subtag || "未分类";
+          totals.set(label, (totals.get(label) || 0) + (Number(entry.minutes) || 0));
+        });
+    });
+    const orderedLabels = [
+      ...(studyTag.subtags || []).filter((label) => totals.has(label)),
+      ...Array.from(totals.keys()).filter((label) => !(studyTag.subtags || []).includes(label)),
+    ];
+    const total = sumMinutes(Array.from(totals.values()));
+    const entries = orderedLabels.map((label, index) => ({
+      label,
+      minutes: totals.get(label) || 0,
+      percent: total ? Math.round(((totals.get(label) || 0) / total) * 100) : 0,
+      color: weeklyBreakdownColor(index, studyTag.color),
+    }));
+    return { total, entries };
+  }
+
+  function monthWeekBuckets(date) {
+    const buckets = [];
+    const monthStart = scopeKey("month", date);
+    const nextMonthDate = new Date(`${monthStart}T00:00:00`);
+    nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+    const firstWeekKey = scopeKey("week", monthStart);
+    const nextMonthFirstWeekKey = scopeKey("week", isoFromDate(nextMonthDate));
+    let cursor = new Date(`${firstWeekKey}T00:00:00`);
+    while (isoFromDate(cursor) !== nextMonthFirstWeekKey) {
+      const key = isoFromDate(cursor);
+      buckets.push({ key, dates: datesInScope("week", key) });
+      cursor.setDate(cursor.getDate() + 7);
+    }
+    return buckets;
+  }
+
+  function keyEventsForDates(dates) {
+    return dates.flatMap((itemDate) => {
+      const items = state.reviews.day?.[scopeKey("day", itemDate)] || [];
+      return items
+        .map(normalizeReviewItem)
+        .filter((item) => item.starred)
+        .map((item) => ({
+          key: `${itemDate}:${item.id}`,
+          date: itemDate,
+          id: item.id,
+          phenomenon: item.phenomenon,
+          reasons: item.reasons || [],
+        }));
+    });
+  }
+
+  function getStudyTag() {
+    return state.settings.tags.find((tag) => tag.name === "学习") || state.settings.tags.find((tag) => tag.id === "study") || state.settings.tags.find((tag) => tag.name?.includes("学习"));
+  }
+
+  function hasCompleteLocationRecord(date) {
+    return locationEntriesForDate(date).some((entry) => entry.type && entry.start && entry.end);
+  }
+
+  function weeklyBreakdownColor(index, baseColor = colors[0]) {
+    return [baseColor, "#4e7fa8", "#b35d4a", "#8a7b35", "#7d5f89", "#4d7d4d", "#a55567"][index % 7];
+  }
+
   function datesInScope(scope, date) {
     const start = new Date(`${scopeKey(scope, date)}T00:00:00`);
     const count = scope === "day" ? 1 : scope === "week" ? 7 : new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
@@ -2582,11 +3379,73 @@
     return item.hasProgress !== false && (item.done || 0) >= (item.total || 1);
   }
 
+  function targetTag(target) {
+    const tag = String(target?.tag || target?.category || "").trim();
+    return tag || "未分类";
+  }
+
+  function defaultTargetTag(sourceState = state) {
+    return normalizedTargetDefaultTag(sourceState.settings?.targetDefaultTag, sourceState.settings?.targetTags || []);
+  }
+
+  function targetTagList(targets = targetsForCurrentScope()) {
+    const tags = [...(state.settings.targetTags || []), ...targets.map(targetTag)].map((tag) => String(tag || "").trim()).filter(Boolean);
+    return orderTargetTags(tags.length ? tags : ["未分类"]);
+  }
+
+  function targetTagListFromState(sourceState) {
+    const tags = [...(sourceState.settings?.targetTags || [])];
+    Object.values(sourceState.targets || {}).forEach((collections) => {
+      Object.values(collections || {}).forEach((items) => {
+        (items || []).forEach((target) => tags.push(targetTag(target)));
+      });
+    });
+    const normalizedTags = tags.map((tag) => String(tag || "").trim()).filter(Boolean);
+    return orderTargetTags(normalizedTags.length ? normalizedTags : ["未分类"]);
+  }
+
+  function orderTargetTags(tags) {
+    const unique = [];
+    tags
+      .map((tag) => String(tag || "").trim())
+      .filter(Boolean)
+      .forEach((tag) => {
+        if (!unique.includes(tag) && tag !== "未分类") unique.push(tag);
+      });
+    return [...unique, "未分类"];
+  }
+
+  function normalizedTargetDefaultTag(tag, tags) {
+    const value = String(tag || "").trim() || "未分类";
+    return orderTargetTags(tags || ["未分类"]).includes(value) ? value : "未分类";
+  }
+
+  function renameTargetTags(draft, renameMap, keptOriginals) {
+    const nextTags = new Set(draft.settings.targetTags || []);
+    Object.values(draft.targets || {}).forEach((collections) => {
+      Object.values(collections || {}).forEach((items) => {
+        (items || []).forEach((target) => {
+          const original = targetTag(target);
+          if (renameMap.has(original)) target.tag = renameMap.get(original) || "未分类";
+          else if (original !== "未分类" && !keptOriginals.has(original) && !nextTags.has(original)) target.tag = "未分类";
+        });
+      });
+    });
+    if (renameMap.has(ui.targetFilterTag)) ui.targetFilterTag = renameMap.get(ui.targetFilterTag) || "__all";
+    if (ui.targetFilterTag !== "__all" && !nextTags.has(ui.targetFilterTag)) ui.targetFilterTag = "__all";
+  }
+
   function executionDays(target) {
     const start = new Date(`${target.startedAt || dateKey()}T00:00:00`);
     const current = new Date(`${dateKey()}T00:00:00`);
     const diff = Math.floor((current - start) / 86400000);
     return Math.max(0, diff);
+  }
+
+  function shortDateText(date) {
+    const parsed = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return date;
+    return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
   }
 
   function targetsForScopeDraft(draft, scope, key) {
@@ -2888,6 +3747,7 @@
     return {
       ...item,
       phenomenon: item.phenomenon ?? item.event ?? "",
+      starred: Boolean(item.starred),
       reasons: reasons.length ? reasons : [{ id: uid(), text: "", measure: "" }],
     };
   }
@@ -2899,6 +3759,13 @@
     if (!hours) return `${mins}m`;
     if (!mins) return `${hours}h`;
     return `${hours}h ${mins}m`;
+  }
+
+  function formatHourText(minutes) {
+    const hours = (Number(minutes) || 0) / 60;
+    if (!hours) return "0小时";
+    const rounded = Math.round(hours * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}小时`;
   }
 
   function compactDateTime(date) {

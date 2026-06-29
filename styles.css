@@ -1304,7 +1304,8 @@ textarea:focus {
 }
 
 .weekly-review-section {
-  gap: 10px;
+  display: grid;
+  gap: 14px;
 }
 
 .weekly-brief-summary {
@@ -1393,7 +1394,8 @@ textarea:focus {
 }
 
 .monthly-review-section {
-  gap: 10px;
+  display: grid;
+  gap: 14px;
 }
 
 .monthly-stats-table {
@@ -1425,6 +1427,70 @@ textarea:focus {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+}
+
+.traffic-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: #fff;
+}
+
+.traffic-tab::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
+.traffic-tab.red {
+  color: #b35d4a;
+  border-color: rgba(179, 93, 74, 0.35);
+  --traffic-color: #b35d4a;
+}
+
+.traffic-tab.green {
+  color: #4d8b57;
+  border-color: rgba(77, 139, 87, 0.35);
+  --traffic-color: #4d8b57;
+}
+
+.traffic-tab.summary {
+  color: #8a7b35;
+  border-color: rgba(138, 123, 53, 0.38);
+  --traffic-color: #c49a35;
+}
+
+.traffic-tab::before {
+  border-color: var(--traffic-color, currentColor);
+  background: var(--traffic-color, currentColor);
+}
+
+.traffic-tab.red.active {
+  background: #b35d4a;
+  border-color: #b35d4a;
+  color: #fff;
+}
+
+.traffic-tab.green.active {
+  background: #4d8b57;
+  border-color: #4d8b57;
+  color: #fff;
+}
+
+.traffic-tab.summary.active {
+  background: #c49a35;
+  border-color: #c49a35;
+  color: #fff;
+}
+
+.traffic-tab.active::before {
+  background: currentColor;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.72);
 }
 
 .monthly-light-list,
@@ -1723,6 +1789,23 @@ button.review-star {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+
+.review-due-reminder {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid #e7d7a6;
+  border-radius: var(--radius);
+  background: #fffaf0;
+  color: #6f5515;
+}
+
+.review-due-reminder p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.45;
 }
 
 .review-reason,

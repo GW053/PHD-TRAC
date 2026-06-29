@@ -4,8 +4,10 @@
   const SUPABASE_URL = "https://hgmpswhitmenyvnxotff.supabase.co";
   const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_WW3rmZCePegJsIf6LeqFvQ_KRgHD9pz";
   const SUPABASE_TABLE = "phd_trac_records";
-  const APP_VERSION = "v1.4";
-  const VERSION_UPDATED_AT = "2026-06-28";
+  const SLEEP_SOURCE_TABLE = "daily_record_sync";
+  const SLEEP_STAT_KEY = "__sleep";
+  const APP_VERSION = "v1.5";
+  const VERSION_UPDATED_AT = "2026-06-29";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -57,6 +59,7 @@
 
   let state = normalizeStateShape(loadState());
   let session = loadSession();
+  let externalSleepData = null;
   let remoteSaveTimer = null;
   let modalCleanup = null;
   const syncMeta = {
@@ -281,6 +284,19 @@
     const d = new Date(date);
     d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
     return d.toISOString().slice(0, 10);
+  }
+
+  function isSunday(date) {
+    const d = new Date(`${date}T00:00:00`);
+    return !Number.isNaN(d.getTime()) && d.getDay() === 0;
+  }
+
+  function isLastDayOfMonth(date) {
+    const d = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return false;
+    const nextDay = new Date(d);
+    nextDay.setDate(d.getDate() + 1);
+    return nextDay.getMonth() !== d.getMonth();
   }
 
   function prettyScope(scope) {
@@ -824,7 +840,7 @@
       <div class="date-switch-panel scope-navigator" data-scope-owner="${owner}">
         <span class="date-label">${scopeSwitchLabel(scope)}</span>
         <button class="date-arrow" type="button" data-action="shift-scope-date" data-owner="${owner}" data-direction="-1" aria-label="上一个">‹</button>
-        <span class="date-display-field">${escapeHtml(scopeDisplay(scope, date))}</span>
+        <span class="date-display-field">${escapeHtml(reviewNavigatorDisplay(scope, date))}</span>
         <label class="date-calendar-button" aria-label="选择时间">
           <span aria-hidden="true">▦</span>
           <input type="${scopePickerType(scope)}" value="${escapeAttr(scopePickerValue(scope, date))}" data-action="set-scope-date" data-owner="${owner}" data-scope="${scope}" />
@@ -917,7 +933,20 @@
         <div class="review-stack">
           ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, scope)).join("") : `<p class="empty">还没有复盘事项。</p>`}
         </div>
+        ${renderReviewDueReminder(date)}
       </section>
+    `;
+  }
+
+  function renderReviewDueReminder(date) {
+    const reminders = [];
+    if (isSunday(date)) reminders.push("该进行周复盘了！");
+    if (isLastDayOfMonth(date)) reminders.push("该进行月复盘了！");
+    if (!reminders.length) return "";
+    return `
+      <div class="review-due-reminder" role="note">
+        ${reminders.map((text) => `<p>${escapeHtml(text)}</p>`).join("")}
+      </div>
     `;
   }
 
@@ -1043,8 +1072,8 @@
                 return `
                   <tr>
                     <td>第${index + 1}周</td>
-                    <td>${formatHourText(study.total)}（${formatHourText(studyAverage)}）</td>
-                    <td>${formatHourText(work.total)}（${formatHourText(workAverage)}）</td>
+                    <td>${formatHourShortText(study.total)}（${formatHourShortText(studyAverage)}）</td>
+                    <td>${formatHourShortText(work.total)}（${formatHourShortText(workAverage)}）</td>
                   </tr>
                 `;
               })
@@ -1064,7 +1093,7 @@
     return `
       <div class="month-review-tabs">
         ${items
-          .map(([mode, label]) => `<button class="toggle-button ${ui.monthReviewMode === mode ? "active" : ""}" type="button" data-action="set-month-review-mode" data-mode="${mode}">${label}</button>`)
+          .map(([mode, label]) => `<button class="toggle-button traffic-tab ${mode} ${ui.monthReviewMode === mode ? "active" : ""}" type="button" data-action="set-month-review-mode" data-mode="${mode}">${label}</button>`)
           .join("")}
       </div>
     `;
@@ -1202,7 +1231,7 @@
         ${renderWeeklyReflectionCard("green", "绿灯", "本周最有成就感/最顺利的事", review.green)}
       </div>
       <section class="weekly-next-card">
-        <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下周拟改进</strong></div>
+        <div class="weekly-card-title"><i class="weekly-icon amber"></i><strong>下周拟改进</strong></div>
         <p class="review-text">${review.nextDirection ? escapeMultiline(review.nextDirection) : "还没有写下周拟改进的方向"}</p>
       </section>
     `;
@@ -1243,7 +1272,7 @@
       <div class="date-switch-panel scope-navigator review-scope-navigator">
         <span class="date-label">${scopeSwitchLabel(scope)}</span>
         <button class="date-arrow" type="button" data-action="shift-review-date" data-review-scope="${scope}" data-direction="-1" aria-label="上一个">‹</button>
-        <span class="date-display-field">${escapeHtml(scopeDisplay(scope, date))}</span>
+        <span class="date-display-field">${escapeHtml(reviewNavigatorDisplay(scope, date))}</span>
         <label class="date-calendar-button" aria-label="选择时间">
           <span aria-hidden="true">▦</span>
           <input type="${scopePickerType(scope)}" value="${escapeAttr(scopePickerValue(scope, date))}" data-action="set-review-scope-date" data-review-scope="${scope}" />
@@ -1372,6 +1401,7 @@
 
   function statMeta(key) {
     if (key === "__other") return { label: "其他", color: "#d7ddd4" };
+    if (key === SLEEP_STAT_KEY) return { label: "睡眠", color: "#6f83b7" };
     if (key === "__loc_dorm") return { label: "宿舍", color: "#4d8b57" };
     if (key === "__loc_work") return { label: "工位", color: "#4e7fa8" };
     if (key === "__loc_outdoor") return { label: "户外", color: "#d8b74e" };
@@ -1468,6 +1498,20 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.5": {
+        updatedAt: "2026-06-29",
+        items: [
+          "接入同一用户在 daily_record_sync 中的睡眠记录，睡眠时长可自动合并进记录汇总，并兼容手动修正的总睡眠时长。",
+          "睡眠跨天时按午夜拆分到前后两天；上床到起床区间默认计为宿舍地点时间，并参与地点时间轴和地点汇总。",
+          "复盘页改为日、周、月顶部页签切换，各复盘保留独立时间；周复盘切换栏隐藏年份，只显示月日范围。",
+          "日复盘现象支持标记关键事件；周复盘新增本周关键事件，默认显示日期和现象，点按后展开原因和措施。",
+          "周复盘新增学习时长、工位时长、学习标签占比、红绿灯自评和下周拟改进，并优化区块间距。",
+          "月复盘新增按周统计表、月度学习标签占比、红/绿灯逐周展开和月度总结；跨月周按月初所在周归属，避免重复复盘。",
+          "周/月复盘的拟改进区域统一只填写方向，月复盘统计表格统一使用 h 作为小时单位。",
+          "优化月复盘红绿灯/总结入口的视觉状态，未选中时也保留对应颜色的实心圆点。",
+          "日复盘会在周日提醒进行周复盘，在每月最后一天提醒进行月复盘。",
+        ],
+      },
       "v1.4": {
         updatedAt: "2026-06-28",
         items: [
@@ -1479,12 +1523,6 @@
           "迁移后的目标会持续同步源日期的未完成目标，源目标完成后会自动从次日移除。",
           "目标标签支持自定义排序，“未分类”固定显示在最后且不作为母任务标签候选项。",
           "目标标签编辑支持设置默认标签，新增目标未手动选择标签时会自动归入默认标签。",
-          "周复盘改为学习/工位时长摘要、学习标签占比、红绿灯自评和下周改进措施结构。",
-          "复盘页改为日、周、月顶部页签切换，周复盘时长摘要压缩为两行。",
-          "月复盘新增周次统计表、月度学习标签占比、红绿灯逐周展开和月度总结结构。",
-          "日复盘支持给现象标记关键事件，周复盘可汇总并展开星标事件的原因和措施。",
-          "月复盘周次按本月 1 号所在周起算，跨月周只归属到一个月度复盘。",
-          "周/月复盘的拟改进区域改为只填写方向，去掉对应措施输入。",
           "目标卡片移除单个迁移按钮，迁移入口移动到目标总编辑按钮旁边。",
           "目标执行天数文案改为“执行第 x 天”。",
           "上下移动按钮统一改为上下竖排布局，减少横向占用。",
@@ -1691,7 +1729,7 @@
       }),
     });
     if (!response.ok) {
-      const detail = await readableRemoteError(response);
+      const detail = await readableRemoteError(response, SUPABASE_TABLE);
       syncMeta.status = "error";
       syncMeta.message = detail;
       throw new Error(detail);
@@ -1708,6 +1746,7 @@
     saveState({ remote: false });
     clearRecordDrafts();
     await saveRemoteNow();
+    await refreshExternalSleepData();
     syncMeta.status = "synced";
     syncMeta.message = "已合并云端数据";
     syncMeta.lastSyncedAt = compactDateTime(new Date());
@@ -1719,7 +1758,7 @@
     const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?id=eq.${encodeURIComponent(session.user.id)}&select=payload&limit=1`, {
       headers: supabaseHeaders(),
     });
-    if (!response.ok) throw new Error(await readableRemoteError(response));
+    if (!response.ok) throw new Error(await readableRemoteError(response, SUPABASE_TABLE));
     const rows = await response.json();
     return rows.length && rows[0].payload ? rows[0].payload : null;
   }
@@ -1731,35 +1770,57 @@
       saveState({ remote: false });
       clearRecordDrafts();
       await saveRemoteNow();
+      await refreshExternalSleepData();
       syncMeta.message = "已自动合并并同步";
       return;
     }
     await saveRemoteNow();
+    await refreshExternalSleepData();
     syncMeta.message = "云端已创建自动备份";
   }
 
-  async function readableRemoteError(response) {
+  async function refreshExternalSleepData() {
+    try {
+      externalSleepData = await fetchSleepSourceData();
+    } catch (error) {
+      console.warn("读取睡眠数据失败", error);
+      externalSleepData = null;
+    }
+  }
+
+  async function fetchSleepSourceData() {
+    await ensureFreshSession();
+    if (!session.user?.id) return null;
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${SLEEP_SOURCE_TABLE}?user_id=eq.${encodeURIComponent(session.user.id)}&select=data,updated_at&limit=1`, {
+      headers: supabaseHeaders(),
+    });
+    if (!response.ok) throw new Error(await readableRemoteError(response, SLEEP_SOURCE_TABLE));
+    const rows = await response.json();
+    return rows.length ? rows[0].data || null : null;
+  }
+
+  async function readableRemoteError(response, tableName = SUPABASE_TABLE) {
     const text = await response.text();
     try {
       const data = JSON.parse(text);
       const detail = [data.message || data.msg, data.details, data.hint, data.code ? `代码 ${data.code}` : "", `HTTP ${response.status}`]
         .filter(Boolean)
         .join("；");
-      return explainRemoteError(detail || text || `云端操作失败 HTTP ${response.status}`);
+      return explainRemoteError(detail || text || `云端操作失败 HTTP ${response.status}`, tableName);
     } catch (error) {
-      return explainRemoteError(text || `云端操作失败 HTTP ${response.status}`);
+      return explainRemoteError(text || `云端操作失败 HTTP ${response.status}`, tableName);
     }
   }
 
-  function explainRemoteError(message) {
+  function explainRemoteError(message, tableName = SUPABASE_TABLE) {
     if (/payload does not exist|42703/i.test(message)) {
-      return `${message}。需要在 Supabase 的 ${SUPABASE_TABLE} 表中增加 jsonb 类型的 payload 列。`;
+      return `${message}。需要检查 Supabase 的 ${tableName} 表字段是否和前端同步代码一致。`;
     }
     if (/permission|rls|row-level|42501/i.test(message)) {
-      return `${message}。需要检查 ${SUPABASE_TABLE} 的 RLS 策略是否允许当前用户 select/insert/update 自己的数据。`;
+      return `${message}。需要检查 ${tableName} 的 RLS 策略是否允许当前用户 select/insert/update 自己的数据。`;
     }
     if (/on_conflict|unique|constraint|42P10/i.test(message)) {
-      return `${message}。需要让 ${SUPABASE_TABLE}.id 成为 primary key 或 unique。`;
+      return `${message}。需要让 ${tableName}.id 成为 primary key 或 unique，或调整前端 on_conflict。`;
     }
     return message;
   }
@@ -3162,6 +3223,8 @@
       for (const [tagId, minutes] of Object.entries(getTotals(state.logs[itemDate] || []))) {
         acc[tagId] = (acc[tagId] || 0) + minutes;
       }
+      const sleepMinutes = sleepMinutesForDate(itemDate);
+      if (sleepMinutes > 0) acc[SLEEP_STAT_KEY] = (acc[SLEEP_STAT_KEY] || 0) + sleepMinutes;
       return acc;
     }, {});
   }
@@ -3492,6 +3555,20 @@
     return `${key.slice(0, 7)}`;
   }
 
+  function reviewNavigatorDisplay(scope, date = dateKey()) {
+    if (scope !== "week") return scopeDisplay(scope, date);
+    const key = scopeKey(scope, date);
+    const end = new Date(`${key}T00:00:00`);
+    end.setDate(end.getDate() + 6);
+    return `${monthDayText(key)} 至 ${monthDayText(isoFromDate(end))}`;
+  }
+
+  function monthDayText(date) {
+    const parsed = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return date;
+    return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
+  }
+
   function scopeSwitchLabel(scope) {
     return { day: "日期", week: "周", month: "月份" }[scope] || "日期";
   }
@@ -3512,6 +3589,83 @@
     return normalizeDateKey(value);
   }
 
+  function sleepMinutesForDate(date) {
+    return Object.entries(externalSleepData?.sleepEntries || {}).reduce((sum, [entryDate, entry]) => {
+      return sum + sleepOverlapMinutesForDate(entryDate, entry, date);
+    }, 0);
+  }
+
+  function sleepDurationFromEntry(entry) {
+    if (!entry || typeof entry !== "object") return 0;
+    const override = normalizedSleepOverride(entry.totalOverride);
+    if (override !== null) return override;
+    const interval = sleepClockIntervalForEntry(todayIso(), entry, "sleep", "wake");
+    return interval ? interval.duration : 0;
+  }
+
+  function sleepOverlapMinutesForDate(entryDate, entry, targetDate) {
+    const interval = sleepClockIntervalForEntry(entryDate, entry, "sleep", "wake");
+    const override = normalizedSleepOverride(entry?.totalOverride);
+    if (!interval) return override !== null && entryDate === targetDate ? override : 0;
+    const overlap = absoluteOverlapForDate(interval, targetDate);
+    if (!overlap) return 0;
+    const duration = override !== null ? override : interval.duration;
+    return interval.duration ? overlap * (duration / interval.duration) : 0;
+  }
+
+  function sleepDormIntervalsForDate(date) {
+    return Object.entries(externalSleepData?.sleepEntries || {})
+      .map(([entryDate, entry]) => sleepClockIntervalForEntry(entryDate, entry, "bed", "rise"))
+      .filter(Boolean)
+      .map((interval) => {
+        const overlap = absoluteOverlapRangeForDate(interval, date);
+        if (!overlap) return null;
+        return { type: "dorm", start: overlap.start, end: overlap.end };
+      })
+      .filter(Boolean);
+  }
+
+  function sleepClockIntervalForEntry(entryDate, entry, startField, endField) {
+    if (!entry || typeof entry !== "object") return null;
+    const start = clockTimeToMinutes(entry[startField]);
+    const end = clockTimeToMinutes(entry[endField]);
+    if (start === null || end === null || start === end) return null;
+    const startDate = start > end ? shiftIsoDate(entryDate, -1) : entryDate;
+    const startAbs = absoluteMinute(startDate, start);
+    const endAbs = absoluteMinute(entryDate, end);
+    if (endAbs <= startAbs) return null;
+    return { startAbs, endAbs, duration: endAbs - startAbs };
+  }
+
+  function absoluteOverlapForDate(interval, date) {
+    const overlap = absoluteOverlapRangeForDate(interval, date);
+    return overlap ? overlap.end - overlap.start : 0;
+  }
+
+  function absoluteOverlapRangeForDate(interval, date) {
+    const dayStart = absoluteMinute(date, 0);
+    const start = Math.max(interval.startAbs, dayStart);
+    const end = Math.min(interval.endAbs, dayStart + 1440);
+    if (end <= start) return null;
+    return { start: start - dayStart, end: end - dayStart };
+  }
+
+  function absoluteMinute(date, minute) {
+    return Math.round(new Date(`${date}T00:00:00`).getTime() / 60000) + minute;
+  }
+
+  function shiftIsoDate(date, days) {
+    const next = new Date(`${date}T00:00:00`);
+    next.setDate(next.getDate() + days);
+    return isoFromDate(next);
+  }
+
+  function normalizedSleepOverride(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
   function weekdayText(date) {
     const day = new Date(`${date}T00:00:00`).getDay();
     return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][day];
@@ -3528,6 +3682,15 @@
   function timeToMinutes(value) {
     const [hours, minutes] = String(value || "00:00").split(":").map(Number);
     return clamp((hours || 0) * 60 + (minutes || 0), 0, 1439);
+  }
+
+  function clockTimeToMinutes(value) {
+    const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return hours * 60 + minutes;
   }
 
   function minutesToTime(value) {
@@ -3579,6 +3742,7 @@
   function locationIntervals(date = dateKey()) {
     const locations = normalizeLocations(state.locationLogs?.[date] || {});
     return [
+      ...sleepDormIntervalsForDate(date),
       ...locations.dorm.flatMap((row) => splitLocationRange("dorm", row.arrive, row.leave)),
       ...locations.work.flatMap((row) => splitLocationRange("work", row.arrive, row.leave)),
     ];
@@ -3766,6 +3930,13 @@
     if (!hours) return "0小时";
     const rounded = Math.round(hours * 10) / 10;
     return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}小时`;
+  }
+
+  function formatHourShortText(minutes) {
+    const hours = (Number(minutes) || 0) / 60;
+    if (!hours) return "0h";
+    const rounded = Math.round(hours * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}h`;
   }
 
   function compactDateTime(date) {

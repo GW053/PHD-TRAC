@@ -321,6 +321,13 @@
     return state.targets[state.targetScope][key];
   }
 
+  function targetsForDate(date = dateKey()) {
+    state.targets.day ||= {};
+    const key = scopeKey("day", date);
+    state.targets.day[key] ||= [];
+    return state.targets.day[key];
+  }
+
   function reviewsForCurrentScope() {
     return reviewsForScope(state.reviewScope, reviewDate(state.reviewScope));
   }
@@ -464,6 +471,7 @@
     const draft = ui.locationDrafts.get(entry.id);
     const visibleEntry = draft || entry;
     const isEditing = isDraft || ui.editingLocations.has(entry.id);
+    const isSynced = visibleEntry.synced || visibleEntry.source === "sleep";
     if (!isEditing) {
       return `
         <article class="entry compact-entry location-entry" data-location-id="${entry.id}" data-location-type="${entry.type}">
@@ -474,7 +482,7 @@
                 <span>${locationLabel(visibleEntry.type)}</span>
               </strong>
               ${
-                ui.recordEditing
+                ui.recordEditing && !isSynced
                   ? `<div class="row-actions">
                       <button class="ghost-button compact-action" type="button" data-action="edit-location">编辑</button>
                     </div>`
@@ -511,6 +519,8 @@
     const draft = ui.logDrafts.get(entry.id);
     const visibleEntry = draft || entry;
     const isEditing = isDraft || ui.editingLogs.has(entry.id);
+    const logDate = visibleEntry.date || dateKey();
+    const linkedTargetName = targetNameForLogLink(visibleEntry.targetId, logDate);
     const tagOptions = state.settings.tags
       .map((tag) => `<option value="${tag.id}" ${tag.id === visibleEntry.tagId ? "selected" : ""}>${escapeHtml(tag.name)}</option>`)
       .join("");
@@ -542,6 +552,7 @@
             <span class="entry-duration">${formatDuration(visibleEntry.minutes || 0)}</span>
           </div>
           ${visibleEntry.note ? `<p class="entry-note">${escapeMultiline(visibleEntry.note)}</p>` : ""}
+          ${linkedTargetName ? `<p class="entry-linked-target">目标：${escapeHtml(linkedTargetName)}</p>` : ""}
         </article>
       `;
     }
@@ -551,8 +562,11 @@
           <select data-action="update-log" data-field="tagId" aria-label="一级标签">${tagOptions}</select>
           <select data-action="update-log" data-field="subtag" aria-label="二级标签">${subtagOptions}</select>
         </div>
-        <div class="entry-edit-grid single-field">
+        <div class="entry-edit-grid">
           <input data-action="update-log" data-field="minutes" type="number" min="0" step="5" value="${visibleEntry.minutes || 0}" aria-label="分钟数" />
+          <select data-action="update-log" data-field="targetId" aria-label="对应目标">
+            ${renderLogTargetOptions(visibleEntry.targetId, logDate)}
+          </select>
         </div>
         <textarea rows="${textareaRows(visibleEntry.note)}" data-action="update-log" data-field="note" placeholder="可填写任务内容及描述状态">${escapeHtml(visibleEntry.note || "")}</textarea>
         <div class="log-edit-buttons">
@@ -561,6 +575,26 @@
         </div>
       </article>
     `;
+  }
+
+  function renderLogTargetOptions(selectedTargetId = "", date = dateKey()) {
+    const selected = String(selectedTargetId || "");
+    const seen = new Set();
+    let selectedKnown = !selected;
+    const options = targetsForDate(date)
+      .map((target) => {
+        const value = targetLinkId(target);
+        if (!value || seen.has(value)) return "";
+        seen.add(value);
+        const isSelected = selected === value || targetLinkedIds(target).has(selected);
+        if (isSelected) selectedKnown = true;
+        const tag = targetTag(target);
+        const label = tag && tag !== "未分类" ? `${target.name || "未命名目标"} · ${tag}` : target.name || "未命名目标";
+        return `<option value="${escapeAttr(value)}" ${isSelected ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    const unknownSelected = selected && !selectedKnown ? `<option value="${escapeAttr(selected)}" selected>已关联目标</option>` : "";
+    return `<option value="">不关联目标</option>${unknownSelected}${options}`;
   }
 
   function renderTotals(totals) {
@@ -768,6 +802,7 @@
               }
             </div>
             <p class="task-age">执行第 ${executionDays(target) + 1} 天</p>
+            <p class="task-spent">记录时长 ${formatDuration(targetLoggedMinutes(target))}</p>
             ${target.description ? `<p class="task-description">${escapeMultiline(target.description)}</p>` : ""}
             ${target.hasProgress ? renderProgress(progress) : ""}
           </div>
@@ -2317,6 +2352,8 @@
       completedAt: existingTarget?.completedAt || "",
       startedAt: existingTarget?.startedAt || dateKey(),
       collapsed: existingTarget?.collapsed ?? true,
+      originTargetId: existingTarget ? targetLinkId(existingTarget) : "",
+      migration: existingTarget?.migration ? { ...existingTarget.migration } : undefined,
       children,
     };
   }
@@ -2679,6 +2716,7 @@
       tagId: tag.id,
       subtag: tag.subtags[0] || "",
       minutes: 60,
+      targetId: "",
       note: "",
     });
     render();
@@ -2903,6 +2941,7 @@
     return {
       ...structuredClone(target),
       id: uid(),
+      originTargetId: targetLinkId(target),
       startedAt: target.startedAt || completedDate,
       collapsed: true,
       migration: {
@@ -3186,6 +3225,55 @@
     return targetsForCurrentScope().find((target) => target.id === targetId);
   }
 
+  function targetLinkId(target) {
+    return String(target?.originTargetId || target?.migration?.sourceTargetId || target?.id || "");
+  }
+
+  function targetLinkedIds(target) {
+    const origin = targetLinkId(target);
+    const ids = new Set([target?.id, target?.originTargetId, target?.migration?.sourceTargetId, origin].filter(Boolean).map(String));
+    if (origin) {
+      Object.values(state.targets?.day || {}).forEach((items) => {
+        (items || []).forEach((item) => {
+          if (targetLinkId(item) !== origin) return;
+          [item.id, item.originTargetId, item.migration?.sourceTargetId].filter(Boolean).forEach((id) => ids.add(String(id)));
+        });
+      });
+    }
+    return ids;
+  }
+
+  function targetNameForLogLink(targetId, date = dateKey()) {
+    if (!targetId) return "";
+    const target = findTargetByLinkId(targetId, date) || findTargetByLinkId(targetId);
+    return target?.name || "";
+  }
+
+  function findTargetByLinkId(targetId, date = null) {
+    const id = String(targetId || "");
+    if (!id) return null;
+    const matches = (target) => targetLinkedIds(target).has(id) || targetLinkId(target) === id;
+    if (date) return targetsForDate(date).find(matches) || null;
+    for (const collections of Object.values(state.targets?.day || {})) {
+      const target = (collections || []).find(matches);
+      if (target) return target;
+    }
+    return null;
+  }
+
+  function targetLoggedMinutes(target, endDate = dateKey()) {
+    const ids = targetLinkedIds(target);
+    const startDate = normalizeDateKey(target?.startedAt) || endDate;
+    return datesBetween(startDate, endDate).reduce((sum, itemDate) => {
+      return (
+        sum +
+        (state.logs[itemDate] || []).reduce((daySum, log) => {
+          return ids.has(String(log.targetId || "")) ? daySum + (Number(log.minutes) || 0) : daySum;
+        }, 0)
+      );
+    }, 0);
+  }
+
   function getHabit(habitId) {
     return state.habits.find((habit) => habit.id === habitId);
   }
@@ -3382,7 +3470,8 @@
   }
 
   function hasCompleteLocationRecord(date) {
-    return locationEntriesForDate(date).some((entry) => entry.type && entry.start && entry.end);
+    const locations = normalizeLocationRecords(state.locationLogs?.[date] || {});
+    return [...locations.work, ...locations.dorm].some((entry) => entry.arrive && entry.leave);
   }
 
   function weeklyBreakdownColor(index, baseColor = colors[0]) {
@@ -3397,6 +3486,19 @@
       d.setDate(start.getDate() + index);
       return isoFromDate(d);
     });
+  }
+
+  function datesBetween(startDate, endDate) {
+    const start = new Date(`${startDate}T00:00:00`);
+    const end = new Date(`${endDate}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return [];
+    const dates = [];
+    const cursor = new Date(start);
+    while (cursor <= end) {
+      dates.push(isoFromDate(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return dates;
   }
 
   function minutesInScope(scope) {
@@ -3625,6 +3727,17 @@
       .filter(Boolean);
   }
 
+  function sleepDormEntriesForDate(date) {
+    return sleepDormIntervalsForDate(date).map((interval, index) => ({
+      id: `sleep-dorm-${date}-${index}-${Math.round(interval.start)}-${Math.round(interval.end)}`,
+      type: "dorm",
+      start: minutesToTime(interval.start),
+      end: minutesToTime(interval.end),
+      source: "sleep",
+      synced: true,
+    }));
+  }
+
   function sleepClockIntervalForEntry(entryDate, entry, startField, endField) {
     if (!entry || typeof entry !== "object") return null;
     const start = clockTimeToMinutes(entry[startField]);
@@ -3797,6 +3910,7 @@
     return [
       ...locations.work.map((row) => ({ id: row.id, type: "work", start: row.arrive, end: row.leave })),
       ...locations.dorm.map((row) => ({ id: row.id, type: "dorm", start: row.arrive, end: row.leave })),
+      ...sleepDormEntriesForDate(date),
     ].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
   }
 

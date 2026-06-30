@@ -546,6 +546,15 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.entry-linked-target {
+  margin: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .compact-empty {
   margin: 0;
   padding: 10px;
@@ -978,6 +987,13 @@ textarea:focus {
 .task-age {
   margin: 4px 0 0;
   color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.task-spent {
+  margin: 2px 0 0;
+  color: var(--accent);
   font-size: 12px;
   font-weight: 760;
 }

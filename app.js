@@ -6,8 +6,8 @@
   const SUPABASE_TABLE = "phd_trac_records";
   const SLEEP_SOURCE_TABLE = "daily_record_sync";
   const SLEEP_STAT_KEY = "__sleep";
-  const APP_VERSION = "v1.5";
-  const VERSION_UPDATED_AT = "2026-06-29";
+  const APP_VERSION = "v1.6";
+  const VERSION_UPDATED_AT = "2026-07-01";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -362,6 +362,7 @@
     if (state.activeTab === "record") renderRecord();
     if (state.activeTab === "execute") renderExecute();
     if (state.activeTab === "review") renderReview();
+    prepareTextareas($("#app"));
   }
 
   function renderRecord() {
@@ -372,10 +373,14 @@
         <div class="section-band">
           <div class="section-title">
             <div>
-              <h2>今日时间追踪</h2>
+              <div class="title-with-date">
+                <h2>今日时间追踪</h2>
+                <span>${dateKey()} ${weekdayText(dateKey())}</span>
+              </div>
               <p class="hint">按上午、下午、晚上记录事项，可调整时间段，也可维护默认标签。</p>
             </div>
             <div class="button-row">
+              <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="record">导出</button>
               ${ui.recordEditing ? `<button class="secondary-button" type="button" data-action="edit-segments">时段</button><button class="secondary-button" type="button" data-action="edit-tags">标签</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-record-edit">${ui.recordEditing ? "完成" : "编辑"}</button>
             </div>
@@ -448,9 +453,10 @@
     `;
   }
 
-  function renderLocationPanel(locations) {
+  function renderLocationPanel(locations, options = {}) {
+    const includeDrafts = options.includeDrafts !== false;
     const entries = locationEntriesForDate(dateKey(), locations);
-    const drafts = [...ui.locationDrafts.values()].filter((entry) => entry.date === dateKey());
+    const drafts = includeDrafts ? [...ui.locationDrafts.values()].filter((entry) => entry.date === dateKey()) : [];
     return `
       <section class="segment-panel location-panel">
         <div class="segment-header">
@@ -482,7 +488,7 @@
                 <span>${locationLabel(visibleEntry.type)}</span>
               </strong>
               ${
-                ui.recordEditing && !isSynced
+                ui.recordEditing
                   ? `<div class="row-actions">
                       <button class="ghost-button compact-action" type="button" data-action="edit-location">编辑</button>
                     </div>`
@@ -509,7 +515,7 @@
         </div>
         <div class="log-edit-buttons">
           <button class="secondary-button" type="button" data-action="save-location">保存</button>
-          ${(ui.recordEditing || isDraft) ? `<button class="danger-button" type="button" data-action="delete-location">删除</button>` : ""}
+          ${(ui.recordEditing || isDraft) && !isSynced ? `<button class="danger-button" type="button" data-action="delete-location">删除</button>` : ""}
         </div>
       </article>
     `;
@@ -654,9 +660,10 @@
       <section class="summary-scope-card active-summary-scope">
         <div class="summary-scope-title">
           <h3>${summaryScopeTitle(scope)}</h3>
-          <span>${escapeHtml(scopeDisplay(scope, dateKey()))}</span>
+          ${scope === "day" ? "" : `<span>${escapeHtml(scopeDisplay(scope, dateKey()))}</span>`}
         </div>
         ${renderSummaryContent("record", scope, dateKey())}
+        ${renderDailyEfficiency()}
         <div class="stat-list habit-rate-row">
           <div class="stat-row">
             <span>习惯平均达标率</span>
@@ -664,6 +671,20 @@
           </div>
         </div>
       </section>
+    `;
+  }
+
+  function renderDailyEfficiency() {
+    const date = dateKey();
+    const study = studySummaryForDates([date]).total;
+    const work = locationTotalsForDay(date).__loc_work || 0;
+    const percent = work > 0 ? Math.round((study / work) * 100) : 0;
+    return `
+      <div class="efficiency-strip">
+        <span>学习 ${formatDuration(study)}</span>
+        <span>工位 ${formatDuration(work)}</span>
+        <strong>效率 ${percent}%</strong>
+      </div>
     `;
   }
 
@@ -705,13 +726,14 @@
     $("#app").innerHTML = `
       <section class="view" data-view="execute">
         ${renderTargetTagBar(targetTags)}
-        <section class="section-band">
+        <section class="section-band target-section">
           <div class="section-title">
             <div>
               <h2>目标</h2>
               <p class="hint">${scopeDisplay(state.targetScope)}</p>
             </div>
             <div class="button-row">
+              <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="execute">导出</button>
               <button class="secondary-button add-button" type="button" data-action="add-target" aria-label="新增目标">+</button>
               ${ui.targetEditing ? `<button class="secondary-button" type="button" data-action="migrate-incomplete-targets">迁移</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-target-edit">${ui.targetEditing ? "完成" : "编辑"}</button>
@@ -722,7 +744,7 @@
           </div>
         </section>
 
-        <section class="section-band">
+        <section class="section-band habit-section">
           <div class="section-title">
             <div>
               <h2>习惯追踪</h2>
@@ -742,11 +764,12 @@
   }
 
   function renderTargetTagBar(tags) {
+    const targets = targetsForCurrentScope();
     return `
       <section class="section-band target-filter-band">
         <div class="target-tag-tabs">
-          <button class="target-tag-chip ${ui.targetFilterTag === "__all" ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="__all">全部</button>
-          ${tags.map((tag) => `<button class="target-tag-chip ${ui.targetFilterTag === tag ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join("")}
+          <button class="target-tag-chip ${ui.targetFilterTag === "__all" ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="__all">全部（${targets.length}）</button>
+          ${tags.map((tag) => `<button class="target-tag-chip ${ui.targetFilterTag === tag ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}（${targetCountForTag(targets, tag)}）</button>`).join("")}
           ${ui.targetEditing ? `<button class="secondary-button target-tag-edit-button" type="button" data-action="edit-target-tags">编辑标签</button>` : ""}
         </div>
       </section>
@@ -768,7 +791,7 @@
     return `
       <section class="target-category-group ${collapsed ? "collapsed" : ""}" data-target-tag="${escapeAttr(tag)}">
         <button class="target-category-header" type="button" data-action="toggle-target-category" data-tag="${escapeAttr(tag)}" aria-label="展开或收起${escapeAttr(tag)}">
-          <span>${escapeHtml(tag)}</span>
+          <span>${escapeHtml(tag)}（${targets.length}）</span>
           <i>${collapsed ? "▸" : "▾"}</i>
         </button>
         ${collapsed ? "" : `<div class="target-category-list">${targets.length ? targets.map((target) => renderTarget(target)).join("") : `<p class="empty compact-empty">这个标签下还没有目标。</p>`}</div>`}
@@ -932,16 +955,19 @@
     ];
     return `
       <section class="section-band review-tab-panel">
-        <div class="review-tabs">
-          ${scopes
-            .map(
-              ([scope, label]) => `
-                <button class="toggle-button ${activeScope === scope ? "active" : ""}" type="button" data-action="set-review-scope" data-scope="${scope}">
-                  ${label}
-                </button>
-              `,
-            )
-            .join("")}
+        <div class="review-tab-toolbar">
+          <div class="review-tabs">
+            ${scopes
+              .map(
+                ([scope, label]) => `
+                  <button class="toggle-button ${activeScope === scope ? "active" : ""}" type="button" data-action="set-review-scope" data-scope="${scope}">
+                    ${label}
+                  </button>
+                `,
+              )
+              .join("")}
+          </div>
+          <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="review">导出</button>
         </div>
       </section>
     `;
@@ -998,25 +1024,26 @@
             <h2>${reviewLabel(scope)}</h2>
             <p class="hint">${scopeDisplay(scope, date)}</p>
           </div>
-          <div class="button-row">
-            <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
-          </div>
         </div>
-        ${renderWeeklyReviewSummary(date)}
+        ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
         ${renderStudyBreakdownCard(weeklyStudyBreakdown(date), "学习标签占比", "本周还没有学习记录。")}
         ${renderWeeklyKeyEvents(date)}
-        ${ui.reviewEditing ? renderWeeklyReviewEditor(review, key) : renderWeeklyReviewDisplay(review)}
+        ${renderWeeklyReviewEditor(review, key)}
       </section>
     `;
   }
 
-  function renderWeeklyReviewSummary(date) {
+  function renderWeeklyReviewSummary(date, options = {}) {
     const study = weeklyStudySummary(date);
     const work = weeklyWorkSummary(date);
+    const lines = [
+      study.total > 0 || !options.omitEmpty ? renderWeeklyBriefLine("学习时长", study.total, study.recordedDays) : "",
+      work.total > 0 || !options.omitEmpty ? renderWeeklyBriefLine("工位时长", work.total, work.recordedDays) : "",
+    ].join("");
+    if (!lines) return "";
     return `
       <div class="weekly-brief-summary">
-        ${renderWeeklyBriefLine("学习时长", study.total, study.recordedDays)}
-        ${renderWeeklyBriefLine("工位时长", work.total, work.recordedDays)}
+        ${lines}
       </div>
     `;
   }
@@ -1039,9 +1066,6 @@
           <div>
             <h2>${reviewLabel(scope)}</h2>
             <p class="hint">${scopeDisplay(scope, date)}</p>
-          </div>
-          <div class="button-row">
-            <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
           </div>
         </div>
         ${renderMonthlyStatsTable(date)}
@@ -1085,8 +1109,16 @@
     `;
   }
 
-  function renderMonthlyStatsTable(date) {
-    const buckets = monthWeekBuckets(date);
+  function renderMonthlyStatsTable(date, options = {}) {
+    const buckets = monthWeekBuckets(date)
+      .map((bucket, index) => ({ ...bucket, index }))
+      .filter((bucket) => {
+        if (!options.omitEmptyRows) return true;
+        const study = studySummaryForDates(bucket.dates);
+        const work = workSummaryForDates(bucket.dates);
+        return study.total > 0 || work.total > 0;
+      });
+    if (!buckets.length) return "";
     return `
       <section class="monthly-table-card">
         <table class="monthly-stats-table">
@@ -1099,14 +1131,14 @@
           </thead>
           <tbody>
             ${buckets
-              .map((bucket, index) => {
+              .map((bucket) => {
                 const study = studySummaryForDates(bucket.dates);
                 const work = workSummaryForDates(bucket.dates);
                 const studyAverage = study.recordedDays ? study.total / study.recordedDays : 0;
                 const workAverage = work.recordedDays ? work.total / work.recordedDays : 0;
                 return `
                   <tr>
-                    <td>第${index + 1}周</td>
+                    <td>第${bucket.index + 1}周</td>
                     <td>${formatHourShortText(study.total)}（${formatHourShortText(studyAverage)}）</td>
                     <td>${formatHourShortText(work.total)}（${formatHourShortText(workAverage)}）</td>
                   </tr>
@@ -1185,7 +1217,7 @@
   }
 
   function renderMonthlyReviewPanel(review, key, date) {
-    if (ui.monthReviewMode === "summary") return renderMonthlySummaryPanel(review, key);
+    if (ui.monthReviewMode === "summary") return renderMonthlySummaryPanel(review, key, date);
     const mode = ui.monthReviewMode === "green" ? "green" : "red";
     const title = mode === "red" ? "红灯情况说明" : "绿灯情况说明";
     const description =
@@ -1199,19 +1231,20 @@
     `;
   }
 
-  function renderMonthlyLightList(mode, date) {
+  function renderMonthlyLightList(mode, date, options = {}) {
     const label = mode === "red" ? "红灯" : "绿灯";
-    const buckets = monthWeekBuckets(date);
+    const buckets = monthWeekBuckets(date)
+      .map((bucket, index) => ({ ...bucket, index, value: readWeeklyReviewForKey(bucket.key)[mode] || "" }))
+      .filter((bucket) => !options.omitEmpty || bucket.value.trim());
+    if (!buckets.length) return "";
     return `
       <div class="monthly-light-list">
         ${buckets
-          .map((bucket, index) => {
-            const weeklyReview = readWeeklyReviewForKey(bucket.key);
-            const value = weeklyReview[mode] || "";
+          .map((bucket) => {
             return `
               <article class="monthly-light-item ${mode}">
-                <strong>第${index + 1}周 · ${label}</strong>
-                <p class="review-text">${value ? escapeMultiline(value) : `这一周还没有填写${label}`}</p>
+                <strong>第${bucket.index + 1}周 · ${label}</strong>
+                <p class="review-text">${bucket.value ? escapeMultiline(bucket.value) : `这一周还没有填写${label}`}</p>
               </article>
             `;
           })
@@ -1220,16 +1253,47 @@
     `;
   }
 
-  function renderMonthlySummaryPanel(review, key) {
+  function renderMonthlySummaryPanel(review, key, date) {
     return `
       <div class="monthly-summary-stack">
-        ${renderMonthlyInsightCard("red", "红灯情况说明", "红灯指向的是同一个事件还是多个？有没有进行针对性调整？本月核心瓶颈是什么？", "redInsight", review.redInsight, key)}
-        ${renderMonthlyInsightCard("green", "绿灯情况说明", "这些做得好的事情有什么共同原因吗？有没有什么可复用的地方？", "greenInsight", review.greenInsight, key)}
+        ${renderMonthlyWeeklySummaryList(date)}
+        <section class="monthly-next-card">
+          <div class="weekly-card-title"><i class="weekly-icon amber"></i><strong>总结</strong></div>
+          ${renderMonthlyTextField("总结", "summary", review.summary, key, "这个月最需要记住的结论、模式或变化")}
+        </section>
         <section class="monthly-next-card">
           <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下月拟改进</strong></div>
           ${renderMonthlyTextField("下月拟改进的方向", "nextDirection", review.nextDirection, key, "下个月最想优先调整或推进的方向")}
         </section>
       </div>
+    `;
+  }
+
+  function renderMonthlyWeeklySummaryList(date, options = {}) {
+    const buckets = monthWeekBuckets(date)
+      .map((bucket, index) => ({ ...bucket, index, summary: readWeeklyReviewForKey(bucket.key).summary || "" }))
+      .filter((bucket) => !options.omitEmpty || bucket.summary.trim());
+    if (!buckets.length) return "";
+    return `
+      <section class="monthly-key-card">
+        <div class="weekly-card-title">
+          <i class="weekly-icon amber"></i>
+          <strong>当月总结</strong>
+          <span>来自本月各周周复盘里的“总结”。</span>
+        </div>
+        <div class="monthly-light-list">
+          ${buckets
+            .map((bucket) => {
+              return `
+                <article class="monthly-light-item summary">
+                  <strong>第${bucket.index + 1}周 · 总结</strong>
+                  <p class="review-text">${bucket.summary ? escapeMultiline(bucket.summary) : "这一周还没有填写总结"}</p>
+                </article>
+              `;
+            })
+            .join("")}
+        </div>
+      </section>
     `;
   }
 
@@ -1247,15 +1311,20 @@
   }
 
   function renderMonthlyTextField(label, field, value, key, placeholder) {
-    if (ui.reviewEditing) {
-      return `
-        <label class="form-row monthly-text-field">
-          ${label ? `<span class="field-label">${escapeHtml(label)}</span>` : ""}
-          <textarea rows="${textareaRows(value)}" data-action="update-month-review" data-month-review-key="${escapeAttr(key)}" data-field="${escapeAttr(field)}" placeholder="${escapeAttr(placeholder)}">${escapeHtml(value || "")}</textarea>
-        </label>
-      `;
-    }
-    return `<p class="review-text">${value ? escapeMultiline(value) : "还没有填写"}</p>`;
+    return `
+      <label class="form-row monthly-text-field">
+        ${label ? `<span class="field-label">${escapeHtml(label)}</span>` : ""}
+        ${renderBulletTextarea({
+          tone: bulletToneForField(field),
+          value,
+          action: "update-month-review",
+          keyName: "data-month-review-key",
+          key,
+          field,
+          placeholder,
+        })}
+      </label>
+    `;
   }
 
   function renderWeeklyReviewDisplay(review) {
@@ -1287,15 +1356,19 @@
         <h3 class="weekly-section-heading">红绿灯自评</h3>
         <label class="form-row">
           <span class="field-label red-field">红灯：本周感到挫败和消耗能量的事</span>
-          <textarea rows="${textareaRows(review.red)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="red" placeholder="写下本周让你挫败、卡住、消耗能量的事情">${escapeHtml(review.red || "")}</textarea>
+          ${renderBulletTextarea({ tone: "red", value: review.red, action: "update-week-review", keyName: "data-weekly-review-key", key, field: "red", placeholder: "写下本周让你挫败、卡住、消耗能量的事情" })}
         </label>
         <label class="form-row">
           <span class="field-label green-field">绿灯：本周最有成就感/最顺利的事</span>
-          <textarea rows="${textareaRows(review.green)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="green" placeholder="写下本周最顺利、最有成就感的事情">${escapeHtml(review.green || "")}</textarea>
+          ${renderBulletTextarea({ tone: "green", value: review.green, action: "update-week-review", keyName: "data-weekly-review-key", key, field: "green", placeholder: "写下本周最顺利、最有成就感的事情" })}
+        </label>
+        <label class="form-row">
+          <span class="field-label amber-field">总结</span>
+          ${renderBulletTextarea({ tone: "amber", value: review.summary, action: "update-week-review", keyName: "data-weekly-review-key", key, field: "summary", placeholder: "这一周最需要记住的结论、模式或变化" })}
         </label>
         <label class="form-row">
           <span class="field-label blue-field">下周拟改进的方向</span>
-          <textarea rows="${textareaRows(review.nextDirection)}" data-action="update-week-review" data-weekly-review-key="${escapeAttr(key)}" data-field="nextDirection" placeholder="下周想优先调整或推进的方向">${escapeHtml(review.nextDirection || "")}</textarea>
+          ${renderBulletTextarea({ tone: "blue", value: review.nextDirection, action: "update-week-review", keyName: "data-weekly-review-key", key, field: "nextDirection", placeholder: "下周想优先调整或推进的方向" })}
         </label>
       </div>
     `;
@@ -1455,6 +1528,7 @@
       if (event.target === backdrop || event.target.dataset.action === "close-modal") closeModal();
     });
     modalCleanup = afterOpen?.(backdrop) || null;
+    prepareTextareas(backdrop);
   }
 
   function closeModal() {
@@ -1508,6 +1582,700 @@
     );
   }
 
+  function openExportModal(scope = state.activeTab) {
+    const exportScope = normalizeExportScope(scope);
+    const defaults = defaultExportItems(exportScope);
+    openModal(
+      `${exportScopeTitle(exportScope)}导出`,
+      `
+        <p class="hint">勾选内容后生成预览图，长按或右键即可保存。</p>
+        <div class="export-scope-grid">
+          ${renderExportOptions(defaults, exportScope)}
+        </div>
+        <div class="export-preview-wrap">
+          <img id="export-image" alt="导出预览" />
+          <p id="export-empty" class="empty compact-empty hidden">请至少勾选一项内容。</p>
+        </div>
+      `,
+      (backdrop) => {
+        let exportPreviewTicket = 0;
+        const updatePreview = async () => {
+          const ticket = ++exportPreviewTicket;
+          const items = $$("input[name='export-item']:checked", backdrop).map((input) => input.value);
+          const enabledCount = $$("input[name='export-item']:not(:disabled)", backdrop).length;
+          const image = $("#export-image", backdrop);
+          const empty = $("#export-empty", backdrop);
+          if (!items.length) {
+            image.removeAttribute("src");
+            image.classList.add("hidden");
+            empty.textContent = enabledCount ? "请至少勾选一项内容。" : "当前页暂无可导出内容。";
+            empty.classList.remove("hidden");
+            return;
+          }
+          image.classList.add("hidden");
+          empty.textContent = "正在生成预览图...";
+          empty.classList.remove("hidden");
+          try {
+            const dataUrl = await createExportImage(items, exportScope);
+            if (ticket !== exportPreviewTicket) return;
+            image.src = dataUrl;
+            image.classList.remove("hidden");
+            empty.classList.add("hidden");
+          } catch (error) {
+            console.warn(error);
+            if (ticket !== exportPreviewTicket) return;
+            empty.textContent = "预览图生成失败，请稍后再试。";
+          }
+        };
+        backdrop.addEventListener("change", (event) => {
+          if (event.target.name === "export-item") updatePreview();
+        });
+        updatePreview();
+      },
+    );
+  }
+
+  function normalizeExportScope(scope) {
+    return ["record", "execute", "review"].includes(scope) ? scope : state.activeTab;
+  }
+
+  function exportScopeTitle(scope) {
+    return { record: "记录页", execute: "执行页", review: "复盘页" }[scope] || "当前页";
+  }
+
+  function defaultExportItems(scope = state.activeTab) {
+    if (scope === "execute") return new Set(["execute-targets", "execute-habits"]);
+    if (scope === "review") return new Set([`review-${state.reviewScope || "day"}`]);
+    return new Set(["record-logs", "record-summary"]);
+  }
+
+  function exportOptionGroups(scope) {
+    if (scope === "execute") {
+      return [
+        [
+          "执行",
+          [
+            ["execute-targets", "目标情况", scopeDisplay("day", dateKey())],
+            ["execute-habits", "习惯情况", habitTrailRangeText()],
+          ],
+        ],
+      ];
+    }
+    if (scope === "review") {
+      const reviewItems = {
+        day: [["review-day", "日复盘", scopeDisplay("day", reviewDate("day"))]],
+        week: [
+          ["review-week", "周复盘", reviewNavigatorDisplay("week", reviewDate("week"))],
+          ["review-week-events", "本周关键事件", reviewNavigatorDisplay("week", reviewDate("week"))],
+        ],
+        month: [
+          ["review-month", "月复盘", scopeDisplay("month", reviewDate("month"))],
+          ["review-month-red", "月红灯情况", scopeDisplay("month", reviewDate("month"))],
+          ["review-month-green", "月绿灯情况", scopeDisplay("month", reviewDate("month"))],
+        ],
+      }[state.reviewScope || "day"];
+      return [["复盘", reviewItems]];
+    }
+    return [
+      [
+        "记录",
+        [
+          ["record-logs", "今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`],
+          ["record-location", "地点时间", "宿舍 / 工位 / 户外"],
+          ["record-summary", `${summaryScopeTitle(ui.recordSummaryScope)}`, scopeDisplay(ui.recordSummaryScope, dateKey())],
+        ],
+      ],
+    ];
+  }
+
+  function renderExportOptions(defaults, scope) {
+    const groups = exportOptionGroups(scope);
+    return groups
+      .map(
+        ([title, items]) => `
+          <section class="export-option-group">
+            <h3>${title}</h3>
+            ${items
+              .map(
+                ([value, label, meta]) => {
+                  const enabled = hasExportData(value);
+                  return `
+                  <label class="export-scope-option ${enabled ? "" : "disabled"}">
+                    <input class="checkbox" type="checkbox" name="export-item" value="${value}" ${defaults.has(value) && enabled ? "checked" : ""} ${enabled ? "" : "disabled"} />
+                    <span>${escapeHtml(label)}</span>
+                    <small>${enabled ? escapeHtml(meta) : "暂无内容"}</small>
+                  </label>
+                `;
+                },
+              )
+              .join("")}
+          </section>
+        `,
+      )
+      .join("");
+  }
+
+  function hasExportData(item) {
+    const day = dateKey();
+    if (item === "record-logs") return (state.logs[day] || []).some((entry) => Number(entry.minutes) > 0 || entry.note || entry.targetId);
+    if (item === "record-location") return locationEntriesForDate(day, locationRecordsForDate(day)).some((entry) => entry.type && (entry.start || entry.end));
+    if (item === "record-summary") return hasRecordSummaryExportData();
+    if (item === "execute-targets") return targetsForCurrentScope().length > 0;
+    if (item === "execute-habits") return state.habits.length > 0;
+    if (item === "review-day") return reviewItemsForExport("day", reviewDate("day")).some(reviewItemHasContent);
+    if (item === "review-week") return hasWeeklyReviewExportData(reviewDate("week"));
+    if (item === "review-week-events") return keyEventsForDates(datesInScope("week", reviewDate("week"))).length > 0;
+    if (item === "review-month") return hasMonthlyReviewExportData(reviewDate("month"));
+    if (item === "review-month-red") return hasMonthlyLightExportData("red", reviewDate("month"));
+    if (item === "review-month-green") return hasMonthlyLightExportData("green", reviewDate("month"));
+    return false;
+  }
+
+  function hasRecordSummaryExportData() {
+    const scope = ui.recordSummaryScope;
+    const date = dateKey();
+    return sumMinutes(Object.values(totalsForLogScope(scope, date))) > 0 || sumMinutes(Object.values(locationTotalsForScope(scope, date))) > 0 || hasHabitDataForScope(scope, date);
+  }
+
+  function hasHabitDataForScope(scope, date) {
+    const dates = datesInScope(scope, date);
+    return state.habits.some((habit) => dates.some((itemDate) => Object.prototype.hasOwnProperty.call(habit.records || {}, itemDate)));
+  }
+
+  function reviewItemsForExport(scope, date) {
+    return (state.reviews?.[scope]?.[scopeKey(scope, date)] || []).map(normalizeReviewItem);
+  }
+
+  function reviewItemHasContent(item) {
+    return Boolean(
+      item?.phenomenon?.trim() ||
+        (item?.reasons || []).some((reason) => reason?.text?.trim() || reason?.measure?.trim()),
+    );
+  }
+
+  function weeklyReviewHasText(review) {
+    return Boolean(review.red?.trim() || review.green?.trim() || review.summary?.trim() || review.nextDirection?.trim());
+  }
+
+  function hasWeeklyReviewExportData(date) {
+    const key = scopeKey("week", date);
+    return weeklyStudySummary(date).total > 0 || weeklyWorkSummary(date).total > 0 || weeklyStudyBreakdown(date).total > 0 || weeklyReviewHasText(readWeeklyReviewForKey(key));
+  }
+
+  function monthlyStatsHasData(date) {
+    return monthWeekBuckets(date).some((bucket) => {
+      const study = studySummaryForDates(bucket.dates);
+      const work = workSummaryForDates(bucket.dates);
+      return study.total > 0 || work.total > 0;
+    });
+  }
+
+  function monthlyWeeklySummaryHasData(date) {
+    return monthWeekBuckets(date).some((bucket) => readWeeklyReviewForKey(bucket.key).summary?.trim());
+  }
+
+  function hasMonthlyReviewExportData(date) {
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    return (
+      monthlyStatsHasData(date) ||
+      monthlyStudyBreakdown(date).total > 0 ||
+      monthlyWeeklySummaryHasData(date) ||
+      Boolean(review.summary?.trim() || review.nextDirection?.trim())
+    );
+  }
+
+  function hasMonthlyLightExportData(mode, date) {
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    const insight = mode === "red" ? review.redInsight : review.greenInsight;
+    return Boolean(insight?.trim()) || monthWeekBuckets(date).some((bucket) => readWeeklyReviewForKey(bucket.key)[mode]?.trim());
+  }
+
+  async function createExportImage(items, scope = state.activeTab) {
+    const exportNode = buildExportNode(items, scope);
+    const measureHost = document.createElement("div");
+    measureHost.className = "review-export-measure";
+    measureHost.appendChild(exportNode);
+    document.body.appendChild(measureHost);
+    try {
+      if (document.fonts?.ready) await document.fonts.ready.catch(() => {});
+      const width = Math.ceil(exportNode.scrollWidth);
+      const height = Math.ceil(exportNode.scrollHeight);
+      return await renderNodeToPng(exportNode, width, height);
+    } finally {
+      measureHost.remove();
+    }
+  }
+
+  function buildExportNode(items, scope = state.activeTab) {
+    const previousReviewEditing = ui.reviewEditing;
+    const previousTargetEditing = ui.targetEditing;
+    const previousHabitEditing = ui.habitEditing;
+    const previousRecordEditing = ui.recordEditing;
+    const node = document.createElement("div");
+    try {
+      ui.reviewEditing = false;
+      ui.targetEditing = false;
+      ui.habitEditing = false;
+      ui.recordEditing = false;
+      node.className = "review-export-sheet";
+      node.innerHTML = `
+        <div class="review-export-stack">
+          ${items.map(renderExportItem).filter(Boolean).join("")}
+        </div>
+      `;
+    } finally {
+      ui.reviewEditing = previousReviewEditing;
+      ui.targetEditing = previousTargetEditing;
+      ui.habitEditing = previousHabitEditing;
+      ui.recordEditing = previousRecordEditing;
+    }
+    return node;
+  }
+
+  function renderExportItem(item) {
+    const cloned = cloneExportSource(item);
+    if (cloned) return cloned.outerHTML;
+    const renderers = {
+      "record-logs": renderRecordLogsExport,
+      "record-location": renderRecordLocationExport,
+      "record-summary": renderRecordSummaryExport,
+      "execute-targets": renderTargetsExport,
+      "execute-habits": renderHabitsExport,
+      "review-day": renderDayReviewExport,
+      "review-week": renderWeekReviewExport,
+      "review-week-events": renderWeekKeyEventsExport,
+      "review-month": renderMonthReviewExport,
+      "review-month-red": () => renderMonthLightExport("red"),
+      "review-month-green": () => renderMonthLightExport("green"),
+    };
+    return renderers[item]?.() || "";
+  }
+
+  function cloneExportSource(item) {
+    const app = $("#app");
+    if (!app) return null;
+    const fragment = document.createElement("div");
+    fragment.className = `export-page-fragment export-${item}`;
+    const appendClone = (node) => {
+      if (!node) return;
+      fragment.appendChild(node.cloneNode(true));
+    };
+
+    if (item === "record-logs") {
+      appendClone(app.querySelector('[data-view="record"] > .section-band:first-child'));
+      appendClone(app.querySelector(".record-with-axis"));
+    } else if (item === "record-location") {
+      appendClone(app.querySelector(".location-panel"));
+    } else if (item === "record-summary") {
+      appendClone(app.querySelector(".today-summary"));
+    } else if (item === "execute-targets") {
+      appendClone(app.querySelector(".target-filter-band"));
+      appendClone(app.querySelector(".target-section"));
+    } else if (item === "execute-habits") {
+      appendClone(app.querySelector(".habit-section"));
+    } else if (item === "review-day") {
+      appendClone(app.querySelector('[data-review-scope="day"]'));
+    } else if (item === "review-week") {
+      appendClone(app.querySelector('[data-review-scope="week"]'));
+    } else if (item === "review-week-events") {
+      appendClone(app.querySelector('[data-review-scope="week"] .monthly-key-card'));
+    } else if (item === "review-month") {
+      appendClone(app.querySelector('[data-review-scope="month"]'));
+    }
+
+    if (!fragment.children.length) return null;
+    cleanExportClone(fragment, item);
+    return fragment.children.length ? fragment : null;
+  }
+
+  function cleanExportClone(fragment, item) {
+    syncExportFormValues(fragment);
+    $$("[data-draft='true'], .editing-entry", fragment).forEach((node) => node.remove());
+    $$(".empty", fragment).forEach((node) => node.remove());
+    if (item === "record-logs") {
+      $$(".segment-panel", fragment).forEach((panel) => {
+        if (!panel.querySelector(".entry")) panel.remove();
+      });
+    }
+    if (item === "record-location") {
+      $$(".location-panel", fragment).forEach((panel) => {
+        if (!panel.querySelector(".entry")) panel.remove();
+      });
+    }
+    if (item === "execute-targets") {
+      $$(".target-category-group", fragment).forEach((group) => {
+        if (!group.querySelector(".task-group")) group.remove();
+      });
+    }
+    $$(".review-text", fragment).forEach((node) => {
+      if (/^还没有/.test(node.textContent.trim())) node.remove();
+    });
+    $$(".bullet-textarea", fragment).forEach((textarea) => {
+      if (!textarea.value.trim()) textarea.closest(".form-row, .monthly-next-card, .monthly-insight-card")?.remove();
+    });
+    $$(".weekly-reflection-card, .weekly-next-card, .monthly-next-card, .monthly-light-item, .monthly-insight-card, .review-item, .monthly-key-event", fragment).forEach((node) => {
+      if (node.querySelector("textarea, .review-text, .monthly-stats-table, .weekly-stacked-bar, .entry, .task-group, .habit-panel")) return;
+      node.remove();
+    });
+  }
+
+  function syncExportFormValues(root) {
+    $$("textarea", root).forEach((textarea) => {
+      textarea.textContent = textarea.value || "";
+      textarea.setAttribute("placeholder", "");
+    });
+    $$("input", root).forEach((input) => {
+      if (input.type === "checkbox" || input.type === "radio") {
+        if (input.checked) input.setAttribute("checked", "");
+        else input.removeAttribute("checked");
+        return;
+      }
+      input.setAttribute("value", input.value || "");
+    });
+    $$("select", root).forEach((select) => {
+      Array.from(select.options).forEach((option) => {
+        if (option.selected) option.setAttribute("selected", "");
+        else option.removeAttribute("selected");
+      });
+    });
+  }
+
+  function renderRecordLogsExport() {
+    const logs = state.logs[dateKey()] || [];
+    const segments = state.settings.segments.filter((segment) => logs.some((entry) => entry.segmentId === segment.id));
+    if (!segments.length) return "";
+    return `
+      <section class="section-band export-block">
+        <div class="section-title"><div><div class="title-with-date"><h2>今日时间追踪</h2><span>${dateKey()} ${weekdayText(dateKey())}</span></div></div></div>
+        <div class="record-timeline-list">
+          ${segments.map((segment) => renderSegmentExport(segment, logs)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderSegmentExport(segment, logs) {
+    const segmentLogs = logs.filter((entry) => entry.segmentId === segment.id);
+    return `
+      <section class="segment-panel" data-segment="${segment.id}">
+        <div class="segment-header">
+          <div class="segment-title-line">
+            <h2>${escapeHtml(segment.name)}</h2>
+            <span class="segment-time">${segment.start} - ${segment.end}</span>
+          </div>
+        </div>
+        <div class="entries">
+          ${segmentLogs.map((entry) => renderLogEntry(entry, false)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRecordLocationExport() {
+    if (!hasExportData("record-location")) return "";
+    return renderLocationPanel(locationRecordsForDate(), { includeDrafts: false });
+  }
+
+  function renderRecordSummaryExport() {
+    if (!hasExportData("record-summary")) return "";
+    return renderRecordSummaries();
+  }
+
+  function renderTargetsExport() {
+    const targets = targetsForCurrentScope();
+    if (!targets.length) return "";
+    const tags = targetTagList(targets).filter((tag) => targets.some((target) => targetTag(target) === tag));
+    return `
+      <section class="section-band export-block">
+        <div class="section-title"><div><h2>目标</h2><p class="hint">${scopeDisplay("day", dateKey())}</p></div></div>
+        <div class="task-stack">
+          ${tags.map((tag) => renderTargetGroupExport(tag, targets.filter((target) => targetTag(target) === tag))).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTargetGroupExport(tag, targets) {
+    const sorted = targets.sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)));
+    return `
+      <section class="target-category-group" data-target-tag="${escapeAttr(tag)}">
+        <div class="target-category-header"><span>${escapeHtml(tag)}（${sorted.length}）</span></div>
+        <div class="target-category-list">${sorted.map((target) => renderTarget(target)).join("")}</div>
+      </section>
+    `;
+  }
+
+  function renderHabitsExport() {
+    if (!state.habits.length) return "";
+    return `
+      <section class="section-band export-block">
+        <div class="section-title"><div><h2>习惯追踪</h2><p class="hint">${habitTrailRangeText()}</p></div></div>
+        <div class="habit-stack">
+          ${state.habits.map(renderHabit).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderWeekReviewExport() {
+    const date = reviewDate("week");
+    const key = scopeKey("week", date);
+    const review = readWeeklyReviewForKey(key);
+    const breakdown = weeklyStudyBreakdown(date);
+    return `
+      <section class="section-band review-scope-section weekly-review-section export-block" data-review-scope="week">
+        ${renderReviewNavigator("week")}
+        <div class="section-title"><div><h2>周复盘</h2><p class="hint">${scopeDisplay("week", date)}</p></div></div>
+        ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
+        ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比", "") : ""}
+        ${renderWeeklyReviewStatic(review)}
+      </section>
+    `;
+  }
+
+  function renderDayReviewExport() {
+    const scope = "day";
+    const date = reviewDate(scope);
+    const reviewItems = reviewItemsForExport(scope, date).filter(reviewItemHasContent);
+    if (!reviewItems.length) return "";
+    return `
+      <section class="section-band review-scope-section export-block" data-review-scope="${scope}">
+        ${renderReviewNavigator(scope)}
+        <div class="section-title">
+          <div>
+            <h2>${reviewLabel(scope)}</h2>
+            <p class="hint">${scopeDisplay(scope, date)}</p>
+          </div>
+        </div>
+        <div class="review-stack">
+          ${reviewItems.map((item, index) => renderReviewItemExport(item, index, scope)).join("")}
+        </div>
+        ${renderReviewDueReminder(date)}
+      </section>
+    `;
+  }
+
+  function renderReviewItemExport(item, index, scope = "day") {
+    const review = normalizeReviewItem(item);
+    const reasons = review.reasons.filter((reason) => reason.text?.trim() || reason.measure?.trim());
+    return `
+      <article class="review-item compact-review-item" data-review-id="${review.id}" data-review-scope="${scope}">
+        <div class="entry-display-line">
+          <span class="review-label phenomenon-label"><i></i><strong>现象${index + 1}</strong></span>
+          ${renderReviewStarControl(review, scope)}
+        </div>
+        ${review.phenomenon?.trim() ? `<p class="review-text">${escapeMultiline(review.phenomenon)}</p>` : ""}
+        ${reasons.length ? `<div class="review-reason-list">${reasons.map((reason, reasonIndex) => renderReasonDisplayExport(reason, reasonIndex)).join("")}</div>` : ""}
+      </article>
+    `;
+  }
+
+  function renderReasonDisplayExport(reason, index) {
+    return `
+      <div class="review-reason">
+        <div class="entry-display-line muted-line"><span class="review-label reason-label"><i></i><strong>原因${index + 1}</strong></span></div>
+        ${reason.text?.trim() ? `<p class="review-text">${escapeMultiline(reason.text)}</p>` : ""}
+        ${reason.measure?.trim() ? `<div class="entry-display-line muted-line"><span class="review-label measure-label"><i></i><strong>措施</strong></span></div><p class="review-text">${escapeMultiline(reason.measure)}</p>` : ""}
+      </div>
+    `;
+  }
+
+  function renderWeeklyReviewStatic(review) {
+    const reflectionCards = [
+      review.red?.trim() ? renderWeeklyReflectionCard("red", "红灯", "本周感到挫败和消耗能量的事", review.red) : "",
+      review.green?.trim() ? renderWeeklyReflectionCard("green", "绿灯", "本周最有成就感/最顺利的事", review.green) : "",
+    ].join("");
+    return `
+      ${reflectionCards ? `<h3 class="weekly-section-heading">红绿灯自评</h3><div class="weekly-reflection-grid">${reflectionCards}</div>` : ""}
+      ${review.summary?.trim() ? `<section class="weekly-next-card">
+        <div class="weekly-card-title"><i class="weekly-icon amber"></i><strong>总结</strong></div>
+        <p class="review-text">${escapeMultiline(review.summary)}</p>
+      </section>` : ""}
+      ${review.nextDirection?.trim() ? `<section class="weekly-next-card">
+        <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下周拟改进</strong></div>
+        <p class="review-text">${escapeMultiline(review.nextDirection)}</p>
+      </section>` : ""}
+    `;
+  }
+
+  function renderWeekKeyEventsExport() {
+    if (!hasExportData("review-week-events")) return "";
+    return `
+      <section class="section-band export-block">
+        ${renderWeeklyKeyEvents(reviewDate("week"))}
+      </section>
+    `;
+  }
+
+  function renderMonthReviewExport() {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = monthlyReviewForKey(key);
+    const breakdown = monthlyStudyBreakdown(date);
+    return `
+      <section class="section-band review-scope-section monthly-review-section export-block" data-review-scope="month">
+        ${renderReviewNavigator("month")}
+        <div class="section-title"><div><h2>月复盘</h2><p class="hint">${scopeDisplay("month", date)}</p></div></div>
+        ${monthlyStatsHasData(date) ? renderMonthlyStatsTable(date, { omitEmptyRows: true }) : ""}
+        ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比（月）", "") : ""}
+        ${monthlyWeeklySummaryHasData(date) ? renderMonthlyWeeklySummaryList(date, { omitEmpty: true }) : ""}
+        ${review.summary?.trim() ? `<section class="monthly-next-card">
+          <div class="weekly-card-title"><i class="weekly-icon amber"></i><strong>总结</strong></div>
+          <p class="review-text">${escapeMultiline(review.summary)}</p>
+        </section>` : ""}
+        ${review.nextDirection?.trim() ? `<section class="monthly-next-card">
+          <div class="weekly-card-title"><i class="weekly-icon blue"></i><strong>下月拟改进</strong></div>
+          <p class="review-text">${escapeMultiline(review.nextDirection)}</p>
+        </section>` : ""}
+      </section>
+    `;
+  }
+
+  function renderMonthLightExport(mode) {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = monthlyReviewForKey(key);
+    const title = mode === "red" ? "红灯情况说明" : "绿灯情况说明";
+    const description =
+      mode === "red"
+        ? "红灯指向的是同一个事件还是多个？有没有进行针对性调整？本月核心瓶颈是什么？"
+        : "这些做得好的事情有什么共同原因吗？有没有什么可复用的地方？";
+    const value = mode === "red" ? review.redInsight : review.greenInsight;
+    const lightList = renderMonthlyLightList(mode, date, { omitEmpty: true });
+    return `
+      <section class="section-band export-block monthly-review-section">
+        <div class="section-title"><div><h2>${title}</h2><p class="hint">${scopeDisplay("month", date)}</p></div></div>
+        ${lightList}
+        ${value?.trim() ? `<section class="monthly-insight-card ${mode}">
+          <div class="weekly-card-title"><i class="weekly-icon ${mode}"></i><strong>${title}</strong><span>${description}</span></div>
+          <p class="review-text">${escapeMultiline(value)}</p>
+        </section>` : ""}
+      </section>
+    `;
+  }
+
+  async function renderNodeToPng(node, width, height) {
+    const cssText = collectExportCss();
+    const serializedNode = new XMLSerializer().serializeToString(node);
+    const html = `
+      <div xmlns="http://www.w3.org/1999/xhtml">
+        <style><![CDATA[${cssText.replace(/\]\]>/g, "]]]]><![CDATA[>")}]]></style>
+        ${serializedNode}
+      </div>
+    `;
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+        <foreignObject width="100%" height="100%">${html}</foreignObject>
+      </svg>
+    `;
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+    try {
+      const image = await loadImage(url);
+      const scale = Math.min(2, window.devicePixelRatio || 1.5);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(width * scale);
+      canvas.height = Math.ceil(height * scale);
+      const context = canvas.getContext("2d");
+      context.scale(scale, scale);
+      context.drawImage(image, 0, 0, width, height);
+      return canvas.toDataURL("image/png");
+    } catch (error) {
+      console.warn("PNG export failed; using SVG preview instead.", error);
+      return svgToDataUrl(svg);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function svgToDataUrl(svg) {
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  }
+
+  function collectExportCss() {
+    const cssText = Array.from(document.styleSheets)
+      .map((sheet) => {
+        try {
+          return Array.from(sheet.cssRules || []).map((rule) => rule.cssText).join("\n");
+        } catch (error) {
+          return "";
+        }
+      })
+      .join("\n");
+    return `
+      ${cssText}
+      .review-export-sheet {
+        width: 430px;
+        min-height: 100%;
+        padding: 14px;
+        background:
+          linear-gradient(180deg, rgba(47, 111, 115, 0.08), transparent 280px),
+          var(--bg);
+        color: var(--ink);
+      }
+      .review-export-header {
+        display: grid;
+        gap: 3px;
+        margin-bottom: 10px;
+      }
+      .review-export-header h2 {
+        margin: 0;
+        color: var(--ink);
+        font-size: 20px;
+      }
+      .review-export-header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .review-export-stack {
+        display: grid;
+        gap: 12px;
+      }
+      .review-export-sheet .hint,
+      .review-export-sheet .empty,
+      .review-export-sheet .weekly-card-title span {
+        display: none !important;
+      }
+      .review-export-sheet .button-row,
+      .review-export-sheet .icon-button,
+      .review-export-sheet .secondary-button,
+      .review-export-sheet .primary-button,
+      .review-export-sheet .ghost-button,
+      .review-export-sheet .danger-button,
+      .review-export-sheet .move-button,
+      .review-export-sheet .stepper-button,
+      .review-export-sheet .toggle-button,
+      .review-export-sheet .summary-controls,
+      .review-export-sheet .summary-scope-tabs,
+      .review-export-sheet .date-arrow,
+      .review-export-sheet .date-calendar-button {
+        display: none !important;
+      }
+      .review-export-sheet .date-switch-panel {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+      .review-export-sheet .record-with-axis {
+        min-height: auto;
+      }
+      .review-export-sheet .export-page-fragment {
+        display: grid;
+        gap: 12px;
+      }
+    `;
+  }
+
+  function loadImage(url) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = url;
+    });
+  }
+
   function downloadBackup(text) {
     const blob = new Blob([text], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1533,6 +2301,18 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.6": {
+        updatedAt: "2026-07-01",
+        items: [
+          "记录页支持把时间追踪记录关联到目标，目标卡片会汇总显示对应记录时长，并兼容目标迁移后的持续统计。",
+          "同步自网站1的宿舍时间会显示在地点时间列表中，并可在本网站内编辑；编辑后会覆盖原同步段，避免重复展示和重复统计。",
+          "记录页底部新增学习时长、工位时长和学习/工位效率百分比。",
+          "目标标签栏和目标分组显示任务数量，目标编辑时标签改为常驻下拉选择，默认显示默认标签且可随时改为其他标签。",
+          "周复盘和月复盘改为常驻可填写文本框，新增总结栏；月复盘总结页显示当月各周总结情况。",
+          "多行文字框支持自动增高；周/月复盘文字框换行后会立即显示待输入小圆点，失焦或保存时自动清理空白行，文本框内不再显示默认描述。",
+          "导出图片入口按记录、执行、复盘拆分；预览改为克隆当前页面结构，尽量达到截图级效果，空内容会灰掉不可勾选，导出图会自动过滤空卡片和说明文字。",
+        ],
+      },
       "v1.5": {
         updatedAt: "2026-06-29",
         items: [
@@ -2172,7 +2952,7 @@
   function openTargetModal(existingTarget = null) {
     const isEdit = Boolean(existingTarget);
     const children = existingTarget?.children?.length ? existingTarget.children : [];
-    const targetTagValue = targetTag(existingTarget);
+    const targetTagValue = existingTarget ? targetTag(existingTarget) : defaultTargetTag();
     openModal(
       isEdit ? "编辑目标" : "新增目标",
       `
@@ -2195,14 +2975,12 @@
             <p class="hint">有二级任务时，进度按二级/三级任务数量计算，不再计算母任务数量。</p>
             <div class="task-node-actions parent-node-actions">
               <button class="secondary-button text-add-button" type="button" data-modal-action="add-child-row">新增二级</button>
-              <button class="secondary-button text-add-button" type="button" data-modal-action="toggle-target-tag">标签</button>
             </div>
-            <label class="target-tag-editor ${targetTagValue !== "未分类" ? "show-target-tag" : ""}">
+            <label class="target-tag-editor show-target-tag">
               <span class="field-label">目标标签</span>
-              <input id="target-tag" list="target-tag-options" value="${escapeAttr(targetTagValue === "未分类" ? "" : targetTagValue)}" placeholder="例如：论文、英语、运动" />
-              <datalist id="target-tag-options">
-                ${targetTagList(targetsForCurrentScope()).filter((tag) => tag !== "未分类").map((tag) => `<option value="${escapeAttr(tag)}"></option>`).join("")}
-              </datalist>
+              <select id="target-tag">
+                ${targetTagList(targetsForCurrentScope()).map((tag) => `<option value="${escapeAttr(tag)}" ${tag === targetTagValue ? "selected" : ""}>${escapeHtml(tag)}</option>`).join("")}
+              </select>
             </label>
           </div>
           <div id="child-editor" class="task-tree-children">
@@ -2224,9 +3002,6 @@
           }
           if (action === "toggle-task-description") {
             event.target.closest(".task-edit-node")?.classList.toggle("show-description");
-          }
-          if (action === "toggle-target-tag") {
-            $(".target-tag-editor", backdrop)?.classList.toggle("show-target-tag");
           }
           if (action === "delete-grandchild-row") {
             const row = event.target.closest("[data-grandchild-row]");
@@ -2340,11 +3115,11 @@
 
     const total = Math.max(1, Number($("#target-total", backdrop).value) || 1);
     const rawTag = $("#target-tag", backdrop)?.value.trim() || "";
-    const fallbackTag = existingTarget ? "未分类" : defaultTargetTag();
+    const fallbackTag = existingTarget ? targetTag(existingTarget) : defaultTargetTag();
     return {
       id: existingTarget?.id || uid(),
       name: $("#target-name", backdrop).value.trim() || "未命名目标",
-      tag: rawTag && rawTag !== "未分类" ? rawTag : fallbackTag,
+      tag: rawTag || fallbackTag,
       description: $("#target-description", backdrop).value.trim(),
       hasProgress: $("#target-progress", backdrop).checked,
       total,
@@ -2554,6 +3329,7 @@
     if (action === "set-month-review-mode") return setMonthReviewMode(actionNode.dataset.mode);
     if (action === "toggle-key-event-detail") return toggleKeyEventDetail(actionNode.dataset.keyEventId);
     if (action === "shift-review-date") return shiftReviewDate(actionNode.dataset.reviewScope, Number(actionNode.dataset.direction) || 0);
+    if (action === "open-export") return openExportModal(actionNode.dataset.exportScope);
     if (action === "add-plan") return openPlanModal();
     if (action === "toggle-plan-edit") return togglePlanEdit();
     if (action === "edit-plan") return openPlanModal(Number(actionNode.closest("[data-plan-index]").dataset.planIndex));
@@ -2570,6 +3346,7 @@
   });
 
   document.addEventListener("input", (event) => {
+    if (event.target instanceof HTMLTextAreaElement) autoResizeTextarea(event.target);
     const actionNode = event.target.closest("[data-action]");
     if (!actionNode) return;
     const action = actionNode.dataset.action;
@@ -2608,6 +3385,32 @@
       setReviewScopeDate(actionNode.dataset.reviewScope, actionNode.value);
     }
   });
+
+  document.addEventListener("paste", (event) => {
+    if (!(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains("bullet-textarea")) return;
+    window.setTimeout(() => sanitizeBulletTextarea(event.target, { removeEmptyLines: false, dispatch: true }), 0);
+  });
+
+  document.addEventListener(
+    "focus",
+    (event) => {
+      if (event.target instanceof HTMLTextAreaElement && event.target.classList.contains("bullet-textarea")) {
+        updateBulletTextareaMarkers(event.target);
+      }
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "blur",
+    (event) => {
+      if (event.target instanceof HTMLTextAreaElement) {
+        if (event.target.classList.contains("bullet-textarea")) sanitizeBulletTextarea(event.target, { removeEmptyLines: true, dispatch: true });
+        autoResizeTextarea(event.target);
+      }
+    },
+    true,
+  );
 
   $("#global-date").addEventListener("change", (event) => {
     const nextDate = normalizeDateKey(event.target.value);
@@ -2844,6 +3647,7 @@
   }
 
   function toggleEditMode(key) {
+    if (key === "reviewEditing" && ui[key]) cleanupBulletTextareas(document);
     ui[key] = !ui[key];
     if (key === "recordEditing" && !ui[key]) clearRecordDrafts();
     if (key === "reviewEditing" && !ui[key]) ui.editingReviews.clear();
@@ -3106,16 +3910,16 @@
   }
 
   function updateWeeklyReviewField(key, field, value) {
-    if (!["red", "green", "nextDirection"].includes(field)) return;
+    if (!["red", "green", "summary", "nextDirection"].includes(field)) return;
     const review = weeklyReviewForKey(key || scopeKey("week", reviewDate("week")));
-    review[field] = value;
+    review[field] = normalizeBulletTextareaValue(value);
     saveState();
   }
 
   function updateMonthlyReviewField(key, field, value) {
-    if (!["redInsight", "greenInsight", "nextDirection"].includes(field)) return;
+    if (!["redInsight", "greenInsight", "summary", "nextDirection"].includes(field)) return;
     const review = monthlyReviewForKey(key || scopeKey("month", reviewDate("month")));
-    review[field] = value;
+    review[field] = normalizeBulletTextareaValue(value);
     saveState();
   }
 
@@ -3345,6 +4149,7 @@
     return {
       red: review.red || "",
       green: review.green || "",
+      summary: review.summary || "",
       nextDirection: review.nextDirection || review.direction || "",
     };
   }
@@ -3359,6 +4164,7 @@
     return {
       redInsight: review.redInsight || review.red || "",
       greenInsight: review.greenInsight || review.green || "",
+      summary: review.summary || "",
       nextDirection: review.nextDirection || review.direction || "",
     };
   }
@@ -3549,6 +4355,10 @@
     return tag || "未分类";
   }
 
+  function targetCountForTag(targets, tag) {
+    return (targets || []).filter((target) => targetTag(target) === tag).length;
+  }
+
   function defaultTargetTag(sourceState = state) {
     return normalizedTargetDefaultTag(sourceState.settings?.targetDefaultTag, sourceState.settings?.targetTags || []);
   }
@@ -3646,6 +4456,31 @@
     return { day: "日复盘", week: "周复盘", month: "月复盘" }[scope];
   }
 
+  function bulletToneForField(field) {
+    return { redInsight: "red", greenInsight: "green", summary: "amber", nextDirection: "blue" }[field] || "blue";
+  }
+
+  function renderBulletTextarea({ tone, value = "", action, keyName, key, field, placeholder }) {
+    return `
+      <div class="bullet-textarea-wrap bullet-${tone}">
+        <div class="bullet-line-layer" aria-hidden="true">${renderBulletMarkers(value)}</div>
+        <textarea class="bullet-textarea" rows="${textareaRows(value)}" data-action="${escapeAttr(action)}" ${keyName}="${escapeAttr(key)}" data-field="${escapeAttr(field)}" placeholder="">${escapeHtml(value || "")}</textarea>
+      </div>
+    `;
+  }
+
+  function renderBulletMarkers(value, options = {}) {
+    const lines = String(value || "").split("\n");
+    const hasContent = lines.some((line) => line.trim());
+    const showPending = Boolean(options.showPending && hasContent);
+    return (lines.length ? lines : [""])
+      .map((line) => {
+        const hasBullet = line.trim() || showPending;
+        return `<span class="${hasBullet ? "has-bullet" : ""}">${line ? escapeHtml(line) : "&nbsp;"}</span>`;
+      })
+      .join("");
+  }
+
   function scopeDisplay(scope, date = dateKey()) {
     const key = scopeKey(scope, date);
     if (scope === "day") return key;
@@ -3717,19 +4552,27 @@
 
   function sleepDormIntervalsForDate(date) {
     return Object.entries(externalSleepData?.sleepEntries || {})
-      .map(([entryDate, entry]) => sleepClockIntervalForEntry(entryDate, entry, "bed", "rise"))
-      .filter(Boolean)
-      .map((interval) => {
+      .map(([entryDate, entry]) => ({
+        entryDate,
+        interval: sleepClockIntervalForEntry(entryDate, entry, "bed", "rise"),
+      }))
+      .filter((item) => item.interval)
+      .map(({ entryDate, interval }) => {
         const overlap = absoluteOverlapRangeForDate(interval, date);
         if (!overlap) return null;
-        return { type: "dorm", start: overlap.start, end: overlap.end };
+        return {
+          id: `sleep-dorm-${entryDate}-${date}-${Math.round(overlap.start)}-${Math.round(overlap.end)}`,
+          type: "dorm",
+          start: overlap.start,
+          end: overlap.end,
+        };
       })
       .filter(Boolean);
   }
 
   function sleepDormEntriesForDate(date) {
-    return sleepDormIntervalsForDate(date).map((interval, index) => ({
-      id: `sleep-dorm-${date}-${index}-${Math.round(interval.start)}-${Math.round(interval.end)}`,
+    return sleepDormIntervalsForDate(date).map((interval) => ({
+      id: interval.id,
       type: "dorm",
       start: minutesToTime(interval.start),
       end: minutesToTime(interval.end),
@@ -3853,9 +4696,11 @@
   }
 
   function locationIntervals(date = dateKey()) {
+    const records = normalizeLocationRecords(state.locationLogs?.[date] || {});
+    const overriddenSleepIds = new Set([...records.work, ...records.dorm].map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
     const locations = normalizeLocations(state.locationLogs?.[date] || {});
     return [
-      ...sleepDormIntervalsForDate(date),
+      ...sleepDormIntervalsForDate(date).filter((interval) => !overriddenSleepIds.has(interval.id)),
       ...locations.dorm.flatMap((row) => splitLocationRange("dorm", row.arrive, row.leave)),
       ...locations.work.flatMap((row) => splitLocationRange("work", row.arrive, row.leave)),
     ];
@@ -3907,10 +4752,11 @@
 
   function locationEntriesForDate(date = dateKey(), source = null) {
     const locations = normalizeLocationRecords(source || state.locationLogs?.[date] || {});
+    const overriddenSleepIds = new Set([...locations.work, ...locations.dorm].map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
     return [
       ...locations.work.map((row) => ({ id: row.id, type: "work", start: row.arrive, end: row.leave })),
       ...locations.dorm.map((row) => ({ id: row.id, type: "dorm", start: row.arrive, end: row.leave })),
-      ...sleepDormEntriesForDate(date),
+      ...sleepDormEntriesForDate(date).filter((entry) => !overriddenSleepIds.has(entry.id)),
     ].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
   }
 
@@ -4081,6 +4927,50 @@
 
   function escapeMultiline(value) {
     return escapeHtml(value).replace(/\n/g, "<br>");
+  }
+
+  function prepareTextareas(root = document) {
+    $$("textarea", root).forEach((textarea) => {
+      updateBulletTextareaMarkers(textarea);
+      autoResizeTextarea(textarea);
+    });
+  }
+
+  function autoResizeTextarea(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement) || textarea.id === "backup-text") return;
+    const minHeight = parseFloat(getComputedStyle(textarea).minHeight) || 76;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.max(textarea.scrollHeight, minHeight)}px`;
+    updateBulletTextareaMarkers(textarea);
+  }
+
+  function cleanupBulletTextareas(root = document) {
+    $$("textarea.bullet-textarea", root).forEach((textarea) => sanitizeBulletTextarea(textarea, { removeEmptyLines: true, dispatch: true }));
+  }
+
+  function sanitizeBulletTextarea(textarea, options = {}) {
+    const cleaned = normalizeBulletTextareaValue(textarea.value, options);
+    if (cleaned === textarea.value) {
+      autoResizeTextarea(textarea);
+      return;
+    }
+    textarea.value = cleaned;
+    autoResizeTextarea(textarea);
+    if (options.dispatch) textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function updateBulletTextareaMarkers(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement) || !textarea.classList.contains("bullet-textarea")) return;
+    const layer = textarea.closest(".bullet-textarea-wrap")?.querySelector(".bullet-line-layer");
+    if (!layer) return;
+    layer.innerHTML = renderBulletMarkers(textarea.value, { showPending: document.activeElement === textarea });
+  }
+
+  function normalizeBulletTextareaValue(value, options = {}) {
+    const lines = String(value || "")
+      .split("\n")
+      .map((line) => line.replace(/^\s*(?:[•●·]\s*)+/, "").trimEnd());
+    return (options.removeEmptyLines ? lines.filter((line) => line.trim()) : lines).join("\n");
   }
 
   function textareaRows(value) {

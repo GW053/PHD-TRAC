@@ -9,6 +9,12 @@
   const APP_VERSION = "v1.6";
   const VERSION_UPDATED_AT = "2026-07-01";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
+  const defaultLocationTypes = [
+    { id: "outdoor", name: "户外", color: "#d8b74e" },
+    { id: "work", name: "工位", color: "#4e7fa8" },
+    { id: "dorm", name: "宿舍", color: "#4d8b57" },
+  ];
+  const DEFAULT_LOCATION_ID = "outdoor";
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -46,9 +52,17 @@
       targetTags: ["未分类"],
       targetDefaultTag: "未分类",
       locations: { work: [], dorm: [] },
+      locationTypes: defaultLocationTypes,
+      defaultLocationId: DEFAULT_LOCATION_ID,
+      expectedStudyHours: "",
+      expectedWorkHours: "",
+      expectedStudyVisible: true,
+      expectedWorkVisible: true,
     },
     logs: {},
     locationLogs: {},
+    locationDescriptions: {},
+    holidays: [],
     targets: {},
     targetMigrations: {},
     habits: [],
@@ -72,19 +86,22 @@
     logDrafts: new Map(),
     editingLocations: new Set(),
     locationDrafts: new Map(),
+    editingLocationDescriptions: new Set(),
+    locationDescriptionDrafts: new Map(),
+    holidayEditing: false,
     editingReviews: new Set(),
     recordEditing: false,
     targetEditing: false,
     habitEditing: false,
     reviewEditing: false,
     plansEditing: false,
-    recordSummaryScope: "day",
     targetFilterTag: "__all",
     collapsedTargetTags: new Set(),
-    recordSummaryMode: "task",
-    reviewSummaryMode: "task",
-    recordSummaryIncludeOther: false,
-    reviewSummaryIncludeOther: false,
+    recordChartSeries: {
+      work: true,
+      study: true,
+      efficiency: true,
+    },
     monthReviewMode: "red",
     expandedKeyEvents: new Set(),
   };
@@ -110,15 +127,23 @@
       month: normalized.reviewDates?.month || normalized.date || todayIso(),
     };
     normalized.locationLogs ||= {};
+    normalized.locationDescriptions ||= {};
+    normalized.holidays = normalizeHolidayRanges(normalized.holidays);
     normalized.targetMigrations ||= {};
     normalized.weeklyReviews ||= {};
     normalized.monthlyReviews ||= {};
     normalized.settings.targetTags = targetTagListFromState(normalized);
     normalized.settings.targetDefaultTag = normalizedTargetDefaultTag(normalized.settings.targetDefaultTag, normalized.settings.targetTags);
+    normalized.settings.locationTypes = normalizeLocationTypes(normalized.settings.locationTypes);
+    normalized.settings.defaultLocationId = normalizeLocationId(normalized.settings.defaultLocationId, normalized.settings.locationTypes);
+    normalized.settings.expectedStudyHours = normalizedExpectedHours(normalized.settings.expectedStudyHours);
+    normalized.settings.expectedWorkHours = normalizedExpectedHours(normalized.settings.expectedWorkHours);
+    normalized.settings.expectedStudyVisible = normalized.settings.expectedStudyVisible !== false;
+    normalized.settings.expectedWorkVisible = normalized.settings.expectedWorkVisible !== false;
     const legacyLocations = normalizeLocations(normalized.settings?.locations || {});
     const hasLocationLogs = Object.values(normalized.locationLogs).some((records) => {
-      const daily = normalizeLocations(records);
-      return daily.work.length || daily.dorm.length;
+      const daily = normalizeLocationRecords(records);
+      return daily.records.length;
     });
     if (!hasLocationLogs && (legacyLocations.work.length || legacyLocations.dorm.length)) {
       normalized.locationLogs[normalized.date || todayIso()] = legacyLocations;
@@ -173,10 +198,14 @@
         tags: mergeById(remote.settings.tags || [], local.settings.tags || []),
         plans: mergeTextList(remote.settings.plans || [], local.settings.plans || []),
         targetTags: mergeTextList(remote.settings.targetTags || [], local.settings.targetTags || []),
+        locationTypes: mergeLocationTypes(remote.settings.locationTypes || [], local.settings.locationTypes || []),
+        defaultLocationId: local.settings.defaultLocationId || remote.settings.defaultLocationId || DEFAULT_LOCATION_ID,
         locations: { work: [], dorm: [] },
       },
       logs: mergeDateCollections(remote.logs || {}, local.logs || {}),
       locationLogs: mergeLocationLogs(remote.locationLogs || {}, local.locationLogs || {}),
+      locationDescriptions: mergeNestedTextMaps(remote.locationDescriptions || {}, local.locationDescriptions || {}),
+      holidays: mergeById(remote.holidays || [], local.holidays || []),
       targets: mergeScopedCollections(remote.targets || {}, local.targets || {}),
       targetMigrations: { ...(remote.targetMigrations || {}), ...(local.targetMigrations || {}) },
       habits: mergeHabits(remote.habits || [], local.habits || []),
@@ -197,10 +226,25 @@
     return Array.from(new Set([...remoteItems, ...localItems].filter(Boolean)));
   }
 
+  function mergeLocationTypes(remoteItems, localItems) {
+    const map = new Map();
+    normalizeLocationTypes(remoteItems).forEach((item) => map.set(item.id, item));
+    normalizeLocationTypes(localItems).forEach((item) => map.set(item.id, item));
+    return Array.from(map.values());
+  }
+
   function mergeDateCollections(remoteCollections, localCollections) {
     const result = { ...remoteCollections };
     for (const [date, items] of Object.entries(localCollections)) {
       result[date] = mergeById(result[date] || [], items || []);
+    }
+    return result;
+  }
+
+  function mergeNestedTextMaps(remoteCollections, localCollections) {
+    const result = { ...remoteCollections };
+    for (const [date, items] of Object.entries(localCollections || {})) {
+      result[date] = { ...(result[date] || {}), ...(items || {}) };
     }
     return result;
   }
@@ -227,12 +271,7 @@
   }
 
   function mergeLocations(remoteLocations, localLocations) {
-    const remote = normalizeLocations(remoteLocations);
-    const local = normalizeLocations(localLocations);
-    return {
-      work: mergeById(remote.work, local.work),
-      dorm: mergeById(remote.dorm, local.dorm),
-    };
+    return mergeLocationRecords(remoteLocations, localLocations);
   }
 
   function mergeLocationLogs(remoteCollections, localCollections) {
@@ -247,8 +286,7 @@
     const remote = normalizeLocationRecords(remoteLocations);
     const local = normalizeLocationRecords(localLocations);
     return {
-      work: mergeById(remote.work, local.work),
-      dorm: mergeById(remote.dorm, local.dorm),
+      records: mergeById(remote.records, local.records),
     };
   }
 
@@ -367,7 +405,8 @@
 
   function renderRecord() {
     const logs = logsForDate();
-    const locations = locationRecordsForDate();
+    locationRecordsForDate();
+    const blocks = recordTimelineBlocks(logs);
     $("#app").innerHTML = `
       <section class="view" data-view="record">
         <div class="section-band">
@@ -377,37 +416,33 @@
                 <h2>今日时间追踪</h2>
                 <span>${dateKey()} ${weekdayText(dateKey())}</span>
               </div>
-              <p class="hint">按上午、下午、晚上记录事项，可调整时间段，也可维护默认标签。</p>
+              <p class="hint">先在左侧时间轴添加地点时间，再在右侧地点块记录事项、时长和关联目标。</p>
             </div>
             <div class="button-row">
-              <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="record">导出</button>
-              ${ui.recordEditing ? `<button class="secondary-button" type="button" data-action="edit-segments">时段</button><button class="secondary-button" type="button" data-action="edit-tags">标签</button>` : ""}
+              ${ui.recordEditing ? `<button class="secondary-button" type="button" data-action="edit-locations">地点</button><button class="secondary-button" type="button" data-action="edit-tags">标签</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-record-edit">${ui.recordEditing ? "完成" : "编辑"}</button>
             </div>
           </div>
         </div>
         <div class="record-layout">
-          ${renderLocationPanel(locations)}
-          <div class="record-with-axis">
-            ${renderDayAxis()}
-            <div class="record-timeline-list">
-              ${state.settings.segments.map((segment) => renderSegment(segment, logs)).join("")}
-            </div>
-          </div>
+          ${renderRecordTimeline(logs, { includeDrafts: true })}
         </div>
+        <section class="section-band record-efficiency-band">
+          ${renderWorkEfficiencyStrip("day", dateKey())}
+        </section>
         <section class="section-band today-summary">
           <div class="section-title compact-title">
             <div>
               <div class="summary-heading-line">
-                <h2>${summaryScopeTitle(ui.recordSummaryScope)}</h2>
-                ${renderRecordSummaryScopeSwitch()}
+                <h2>近7日汇总</h2>
               </div>
-              <p class="hint">${recordSummaryHint(ui.recordSummaryScope)}</p>
+              <p class="hint">${recordChartRangeText()}</p>
             </div>
-            ${renderSummaryToggle("record", ui.recordSummaryMode)}
+            ${renderRecordChartControls()}
           </div>
           ${renderRecordSummaries()}
         </section>
+        ${renderRecordBottomSettings()}
       </section>
     `;
   }
@@ -415,22 +450,379 @@
   function renderDayAxis() {
     const range = recordAxisRange();
     const slices = locationSlicesForRange(range.start, range.end);
+    const total = range.end - range.start;
     return `
       <aside class="record-axis" aria-label="地点时间轴">
         <div class="axis-bar">
           ${slices
-            .map(
-              (slice) => `
-                <span
-                  class="axis-slice axis-${slice.type}"
-                  style="height:${slice.percent}%"
-                  title="${locationLabel(slice.type)} ${minutesToTime(slice.start)}-${minutesToTime(slice.end)}"
-                ></span>
-              `,
-            )
+            .map((slice, index) => renderAxisSlice(slice, index, slices.length, range.start, total))
+            .join("")}
+          ${slices
+            .slice(0, -1)
+            .map((slice) => renderAxisBoundaryLabel(slice.end, range.start, total))
             .join("")}
         </div>
+        <button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>
       </aside>
+    `;
+  }
+
+  function renderRecordTimeline(logs, options = {}) {
+    const range = recordAxisRange();
+    const total = range.end - range.start;
+    const slices = locationSlicesForRange(range.start, range.end);
+    const blocks = recordTimelineBlocks(logs, options);
+    const draftLogs = options.includeDrafts !== false ? [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey()) : [];
+    const visibleBlocks = options.requireLogs
+      ? blocks.filter((block) => block.logs.length || block.drafts.length || locationDescriptionForIds(block.ids || [block.id]))
+      : blocks;
+    const blockByAxisKey = new Map(
+      visibleBlocks
+        .filter((block) => !block.legacy)
+        .map((block) => [locationAxisKey(block.ids || [block.id]), block]),
+    );
+    const legacyBlocks = visibleBlocks.filter((block) => block.legacy);
+    const rows = slices
+      .map((slice, index) => {
+        const key = locationAxisKey(slice.ids || []);
+        let block = blockByAxisKey.get(key) || null;
+        if (!block && slice.type === DEFAULT_LOCATION_ID) {
+          block = autoOutdoorBlockFromSlice(slice, logs, draftLogs);
+          if (options.requireLogs && !block.logs.length && !block.drafts.length && !locationDescriptionForIds(block.ids || [block.id])) block = null;
+        }
+        return renderTimelineRow(slice, index, slices.length, range.start, total, block);
+      })
+      .join("");
+    return `
+      <div class="record-with-axis">
+        ${rows}
+        ${legacyBlocks.map((block) => renderLegacyTimelineRow(block)).join("")}
+        <button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>
+      </div>
+    `;
+  }
+
+  function renderTimelineRow(slice, index, count, rangeStart, total, block = null) {
+    const minutes = slice.end - slice.start;
+    const rowMin = Math.max(34, Math.round((minutes / total) * 220));
+    const topGap = index > 0 ? "var(--axis-label-gap)" : "0px";
+    const bottomGap = index < count - 1 ? "var(--axis-label-gap)" : "0px";
+    return `
+      <div class="timeline-row" style="--row-min:${rowMin}px;--row-top-gap:${topGap};--row-bottom-gap:${bottomGap}">
+        <div class="axis-row-cell">
+          ${renderAxisSlice(slice, index, count)}
+          ${index < count - 1 ? renderAxisBoundaryLabel(slice.end) : ""}
+        </div>
+        <div class="timeline-row-content">
+          ${block ? renderLocationBlock(block) : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderLegacyTimelineRow(block) {
+    return `
+      <div class="timeline-row legacy-timeline-row" style="--row-min:auto">
+        <div class="axis-row-cell"></div>
+        <div class="timeline-row-content">
+          ${renderLocationBlock(block)}
+        </div>
+      </div>
+    `;
+  }
+
+  function locationAxisKey(ids = []) {
+    return [...ids].filter(Boolean).sort().join("|");
+  }
+
+  function autoOutdoorId(date, start, end) {
+    return `auto-outdoor-${date}-${Math.round(start)}-${Math.round(end)}`;
+  }
+
+  function renderAxisSlice(slice, index, count) {
+    const beforeGap = index > 0 ? "var(--axis-label-gap)" : "0px";
+    const afterGap = index < count - 1 ? "var(--axis-label-gap)" : "0px";
+    return `
+      <button
+        class="axis-slice axis-${slice.type || "empty"}"
+        type="button"
+        data-action="set-location-slice"
+        data-location-id="${escapeAttr(slice.id || "")}"
+        data-location-ids="${escapeAttr((slice.ids || []).join(","))}"
+        data-location-type="${escapeAttr(slice.type || defaultLocationId())}"
+        data-axis-start="${escapeAttr(minutesToTime(slice.start))}"
+        data-axis-end="${escapeAttr(minutesToTime(slice.end))}"
+        style="top:${beforeGap};bottom:${afterGap};--location-color:${locationColor(slice.type)};--location-soft:${locationSoftColor(slice.type, 0.18)}"
+        title="${locationLabel(slice.type)} ${minutesToTime(slice.start)}-${minutesToTime(slice.end)}"
+        aria-label="${locationLabel(slice.type)} ${minutesToTime(slice.start)} 到 ${minutesToTime(slice.end)}"
+      ></button>
+    `;
+  }
+
+  function renderAxisBoundaryLabel(minute) {
+    return `
+      <span class="axis-boundary-label">${escapeHtml(minutesToTime(minute))}</span>
+    `;
+  }
+
+  function recordTimelineBlocks(logs, options = {}) {
+    const includeDrafts = options.includeDrafts !== false;
+    const entries = mergedLocationEntriesForDate(dateKey()).filter((entry) => entry.type && entry.start && entry.end);
+    const draftLogs = includeDrafts ? [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey()) : [];
+    const knownIds = new Set(entries.flatMap((entry) => entry.ids || [entry.id]));
+    const range = recordAxisRange();
+    const autoOutdoorIds = new Set(
+      locationSlicesForRange(range.start, range.end)
+        .flatMap((slice) => slice.ids || [slice.id])
+        .filter((id) => String(id || "").startsWith("auto-outdoor-")),
+    );
+    const blocks = entries.map((entry) => ({
+      id: entry.id,
+      ids: entry.ids || [entry.id],
+      type: entry.type,
+      title: locationLabel(entry.type),
+      start: entry.start,
+      end: entry.end,
+      rawEnd: entry.rawEnd ?? entry.end,
+      openEnd: Boolean(entry.openEnd),
+      source: entry.source,
+      logs: logs.filter((log) => (entry.ids || [entry.id]).includes(log.segmentId)),
+      drafts: draftLogs.filter((log) => (entry.ids || [entry.id]).includes(log.segmentId)),
+    }));
+
+    const legacyBlocks = state.settings.segments
+      .map((segment) => ({
+        id: segment.id,
+        type: "",
+        title: `未分配地点 · ${segment.name}`,
+        start: segment.start,
+        end: segment.end,
+        legacy: true,
+        logs: logs.filter((log) => log.segmentId === segment.id),
+        drafts: draftLogs.filter((log) => log.segmentId === segment.id),
+      }))
+      .filter((block) => block.logs.length || block.drafts.length);
+
+    const legacyIds = new Set(state.settings.segments.map((segment) => segment.id));
+    const orphanIds = Array.from(
+      new Set([...logs, ...draftLogs].map((log) => log.segmentId).filter((id) => id && !knownIds.has(id) && !legacyIds.has(id) && !autoOutdoorIds.has(id))),
+    );
+    const orphanBlocks = orphanIds.map((id) => ({
+      id,
+      type: "",
+      title: "未分配地点",
+      start: "",
+      end: "",
+      legacy: true,
+      logs: logs.filter((log) => log.segmentId === id),
+      drafts: draftLogs.filter((log) => log.segmentId === id),
+    }));
+
+    return [...blocks, ...legacyBlocks, ...orphanBlocks].filter((block) => block.logs.length || block.drafts.length || !block.legacy);
+  }
+
+  function autoOutdoorBlockFromSlice(slice, logs, draftLogs) {
+    const id = slice.id || autoOutdoorId(dateKey(), slice.start, slice.end);
+    const ids = slice.ids?.length ? slice.ids : [id];
+    return {
+      id,
+      ids,
+      type: DEFAULT_LOCATION_ID,
+      title: locationLabel(DEFAULT_LOCATION_ID),
+      start: minutesToTime(slice.start),
+      end: minutesToTime(slice.end),
+      rawEnd: minutesToTime(slice.end),
+      auto: Boolean(slice.auto),
+      logs: logs.filter((log) => ids.includes(log.segmentId)),
+      drafts: draftLogs.filter((log) => ids.includes(log.segmentId)),
+    };
+  }
+
+  function renderLocationBlock(block) {
+    const ids = (block.ids?.length ? block.ids : [block.id]).filter(Boolean);
+    const color = locationColor(block.type);
+    const tone = locationBlockTone(block.type);
+    const legacyClass = block.legacy ? " legacy-location-block" : "";
+    const outdoorClass = block.type === DEFAULT_LOCATION_ID ? " outdoor-location-block" : "";
+    const hasAutoId = ids.some((id) => String(id).startsWith("auto-outdoor-"));
+    const autoClass = block.auto || hasAutoId ? " auto-location-block" : "";
+    const hasEntries = block.logs.length || block.drafts.length;
+    const noteKey = locationAxisKey(ids);
+    const savedDescription = locationDescriptionForIds(ids);
+    const draftDescription = ui.locationDescriptionDrafts.has(noteKey) ? ui.locationDescriptionDrafts.get(noteKey) : savedDescription;
+    const descriptionOpen = ui.editingLocationDescriptions.has(noteKey);
+    const timeText = locationBlockTimeText(block);
+    return `
+      <section
+        class="segment-panel location-record-block${legacyClass}${outdoorClass}${autoClass}"
+        data-location-block="${escapeAttr(block.id)}"
+        data-location-ids="${escapeAttr(ids.join(","))}"
+        data-location-note-key="${escapeAttr(noteKey)}"
+        data-location-type="${escapeAttr(block.type || "")}"
+        data-location-start="${escapeAttr(block.start || "")}"
+        data-location-end="${escapeAttr(block.end || "")}"
+        data-location-raw-end="${escapeAttr(block.rawEnd ?? block.end ?? "")}"
+        style="--location-color:${color};--location-bg:${tone.bg};--location-border:${tone.border}"
+      >
+        <div class="segment-header">
+          <div class="segment-title-line">
+            <h2>${escapeHtml(block.title)}</h2>
+            ${timeText ? `<span class="segment-time">${timeText}</span>` : ""}
+          </div>
+          <div class="button-row compact-row-actions">
+            ${ui.recordEditing && !block.legacy && !block.auto && !hasAutoId ? `<button class="ghost-button compact-action" type="button" data-action="edit-location-time">编辑</button>` : ""}
+            <button class="icon-button description-toggle location-description-toggle ${descriptionOpen ? "active" : ""}" type="button" data-action="toggle-location-description" aria-label="地点描述">☰</button>
+            <button class="icon-button" type="button" data-action="add-log" data-segment-id="${escapeAttr(block.id)}" aria-label="新增记录">+</button>
+          </div>
+        </div>
+        ${renderLocationDescription(ids, noteKey, savedDescription, draftDescription, descriptionOpen, color)}
+        ${
+          hasEntries
+            ? `<div class="entries">${[...block.logs.map((entry) => renderLogEntry(entry, false)), ...block.drafts.map((entry) => renderLogEntry(entry, true))].join("")}</div>`
+            : ""
+        }
+      </section>
+    `;
+  }
+
+  function locationBlockTone(type) {
+    if (type === DEFAULT_LOCATION_ID) {
+      return {
+        bg: "rgba(251, 252, 250, 0.82)",
+        border: "rgba(32, 35, 31, 0.08)",
+      };
+    }
+    return {
+      bg: locationSoftColor(type, 0.13),
+      border: locationSoftColor(type, 0.3),
+    };
+  }
+
+  function locationBlockTimeText(block) {
+    if (block.type === DEFAULT_LOCATION_ID) return "";
+    if (!block.start) return "旧记录";
+    if (block.openEnd) return `${escapeHtml(block.start)} -`;
+    return block.end ? `${escapeHtml(block.start)} - ${escapeHtml(block.end)}` : `${escapeHtml(block.start)} -`;
+  }
+
+  function renderLocationDescription(ids, noteKey, savedDescription, draftDescription, isEditing, color) {
+    if (isEditing) {
+      return `
+        <div class="location-description-editor bullet-textarea-wrap" style="--bullet-color:${color}">
+          <div class="bullet-line-layer" aria-hidden="true">${renderBulletMarkers(draftDescription)}</div>
+          <textarea
+            class="bullet-textarea location-description-input"
+            rows="${locationDescriptionRows(draftDescription)}"
+            data-action="update-location-description"
+            data-location-note-key="${escapeAttr(noteKey)}"
+            data-location-note-ids="${escapeAttr(ids.join(","))}"
+            placeholder=""
+          >${escapeHtml(draftDescription || "")}</textarea>
+        </div>
+      `;
+    }
+    const lines = locationDescriptionLines(savedDescription);
+    if (!lines.length) return "";
+    return `
+      <div class="location-description-list">
+        ${lines
+          .map(
+            (line) => `
+              <p class="location-description-line">
+                <i style="background:${color}"></i>
+                <span>${escapeHtml(line)}</span>
+              </p>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  }
+
+  function locationDescriptionForIds(ids = [], date = dateKey()) {
+    const descriptions = state.locationDescriptions?.[date] || {};
+    return ids.map((id) => descriptions[id]).filter(Boolean).join("\n");
+  }
+
+  function locationDescriptionLines(value) {
+    return normalizeLocationDescription(value)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function normalizeLocationDescription(value) {
+    return normalizeBulletTextareaValue(value, { removeEmptyLines: true }).trim();
+  }
+
+  function locationDescriptionRows(value) {
+    const lines = String(value || "").split("\n").length;
+    return clamp(lines || 1, 1, 6);
+  }
+
+  function renderRecordBottomSettings() {
+    const holidays = normalizeHolidayRanges(state.holidays);
+    return `
+      <section class="section-band record-bottom-settings">
+        <div class="expected-hours-panel">
+          <div>
+            <h2>期望时长</h2>
+          </div>
+          <label class="expected-hour-row">
+            <span class="expected-hour-label">期望学习<input class="checkbox" type="checkbox" data-action="toggle-expected-line" data-field="study" ${state.settings.expectedStudyVisible !== false ? "checked" : ""} /></span>
+            <input data-action="update-expected-hours" data-field="study" type="number" min="0" step="0.5" value="${escapeAttr(state.settings.expectedStudyHours || "")}" placeholder="小时" />
+          </label>
+          <label class="expected-hour-row">
+            <span class="expected-hour-label">期望工位<input class="checkbox" type="checkbox" data-action="toggle-expected-line" data-field="work" ${state.settings.expectedWorkVisible !== false ? "checked" : ""} /></span>
+            <input data-action="update-expected-hours" data-field="work" type="number" min="0" step="0.5" value="${escapeAttr(state.settings.expectedWorkHours || "")}" placeholder="小时" />
+          </label>
+        </div>
+        <section class="holiday-settings-panel">
+          <div class="section-title compact-title holiday-settings-title">
+            <div>
+              <h2>假期</h2>
+            </div>
+            <div class="button-row compact-row-actions">
+              <button class="secondary-button" type="button" data-action="edit-holidays">${ui.holidayEditing ? "收起" : "编辑"}</button>
+              <button class="secondary-button add-button" type="button" data-action="add-holiday" aria-label="新增假期">+</button>
+            </div>
+          </div>
+          <div class="holiday-range-list ${ui.holidayEditing ? "editing" : "display"}">
+            ${
+              ui.holidayEditing
+                ? `${holidays.map(renderHolidayRangeRow).join("") || `<p class="empty compact-empty">暂无假期。</p>`}<button class="primary-button holiday-save-button" type="button" data-action="save-holidays">保存</button>`
+                : holidays.length
+                  ? holidays.map(renderHolidayRangeDisplay).join("")
+                  : ""
+            }
+          </div>
+        </section>
+      </section>
+    `;
+  }
+
+  function renderHolidayRangeDisplay(holiday) {
+    return `
+      <div class="holiday-range-display" data-holiday-id="${escapeAttr(holiday.id)}">
+        <span>假期</span>
+        <strong>${escapeHtml(formatHolidayRange(holiday))}</strong>
+      </div>
+    `;
+  }
+
+  function renderHolidayRangeRow(holiday) {
+    return `
+      <div class="holiday-range-row" data-holiday-id="${escapeAttr(holiday.id)}">
+        <label class="form-row">
+          <span class="field-label">开始</span>
+          <input data-action="update-holiday" data-field="start" type="date" value="${escapeAttr(holiday.start)}" />
+        </label>
+        <label class="form-row">
+          <span class="field-label">结束</span>
+          <input data-action="update-holiday" data-field="end" type="date" value="${escapeAttr(holiday.end)}" />
+        </label>
+        <button class="danger-button" type="button" data-action="delete-holiday">删除</button>
+      </div>
     `;
   }
 
@@ -462,7 +854,7 @@
         <div class="segment-header">
           <div class="segment-title-line">
             <h2>地点时间</h2>
-            <span class="segment-time">宿舍 / 工位 / 户外</span>
+            <span class="segment-time">${locationTypes().map((item) => escapeHtml(item.name)).join(" / ")}</span>
           </div>
           <button class="icon-button" type="button" data-action="add-location" aria-label="新增地点时间">+</button>
         </div>
@@ -505,8 +897,7 @@
         <div class="entry-edit-grid">
           <select data-action="update-location" data-field="type" aria-label="地点类型">
             <option value="" ${!visibleEntry.type ? "selected" : ""}>无</option>
-            <option value="work" ${visibleEntry.type === "work" ? "selected" : ""}>工位</option>
-            <option value="dorm" ${visibleEntry.type === "dorm" ? "selected" : ""}>宿舍</option>
+            ${renderLocationTypeOptions(visibleEntry.type)}
           </select>
           <div class="grid-2 tight-grid">
             <input data-action="update-location" data-field="start" type="time" value="${visibleEntry.start || ""}" aria-label="开始时间" />
@@ -623,99 +1014,240 @@
     `;
   }
 
-  function renderSummaryToggle(owner, mode) {
-    const includeOther = owner === "review" ? ui.reviewSummaryIncludeOther : ui.recordSummaryIncludeOther;
-    return `
-      <div class="summary-controls">
-        ${
-          mode === "task"
-            ? `<label class="summary-other-toggle"><input class="checkbox" type="checkbox" data-action="toggle-summary-other" data-owner="${owner}" ${includeOther ? "checked" : ""} />其他</label>`
-            : ""
-        }
-        <div class="summary-tabs">
-          <button class="toggle-button ${mode === "task" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="task">任务</button>
-          <button class="toggle-button ${mode === "location" ? "active" : ""}" type="button" data-action="set-summary-mode" data-owner="${owner}" data-mode="location">地点</button>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderSummaryContent(owner, scopeOverride = null, dateOverride = dateKey()) {
-    const scope = scopeOverride || (owner === "review" ? state.reviewScope : "day");
-    const mode = owner === "review" ? ui.reviewSummaryMode : ui.recordSummaryMode;
-    const includeOther = owner === "review" ? ui.reviewSummaryIncludeOther : ui.recordSummaryIncludeOther;
-    const totals = mode === "location" ? locationTotalsForScope(scope, dateOverride) : totalsForLogScope(scope, dateOverride);
-    const baseline = mode === "location" || includeOther ? minutesInScope(scope) : null;
-    return `
-      <div class="data-summary compact-summary">
-        ${renderPie(totals, baseline)}
-        <div class="stat-list">${renderStatRows(totals, baseline)}</div>
-      </div>
-    `;
-  }
-
   function renderRecordSummaries() {
-    const scope = ui.recordSummaryScope;
+    const dates = recentRecordChartDates();
     return `
       <section class="summary-scope-card active-summary-scope">
         <div class="summary-scope-title">
-          <h3>${summaryScopeTitle(scope)}</h3>
-          ${scope === "day" ? "" : `<span>${escapeHtml(scopeDisplay(scope, dateKey()))}</span>`}
+          <h3>近7日汇总</h3>
+          <span>${escapeHtml(recordChartRangeText())}</span>
         </div>
-        ${renderSummaryContent("record", scope, dateKey())}
-        ${renderDailyEfficiency()}
+        ${renderRecordTrendChart(dates)}
         <div class="stat-list habit-rate-row">
           <div class="stat-row">
             <span>习惯平均达标率</span>
-            <strong>${habitRateForScope(scope, dateKey())}%</strong>
+            <strong>${habitRateForDates(dates)}%</strong>
           </div>
         </div>
       </section>
     `;
   }
 
-  function renderDailyEfficiency() {
-    const date = dateKey();
-    const study = studySummaryForDates([date]).total;
-    const work = locationTotalsForDay(date).__loc_work || 0;
-    const percent = work > 0 ? Math.round((study / work) * 100) : 0;
-    return `
-      <div class="efficiency-strip">
-        <span>学习 ${formatDuration(study)}</span>
-        <span>工位 ${formatDuration(work)}</span>
-        <strong>效率 ${percent}%</strong>
-      </div>
-    `;
+  function recentRecordChartDates() {
+    return lastNDates(dateKey(), 7);
   }
 
-  function renderRecordSummaryScopeSwitch() {
+  function recordChartRangeText() {
+    const dates = recentRecordChartDates();
+    return `${dates[0]} 至 ${dates[dates.length - 1]}`;
+  }
+
+  function renderRecordChartControls() {
+    const labels = ui.recordChartSeries;
+    const items = [
+      ["work", "工位具体时间"],
+      ["study", "学习具体时间"],
+      ["efficiency", "效率数值"],
+    ];
     return `
-      <div class="summary-scope-tabs">
-        ${["day", "week", "month"]
-          .map((scope) => `<button class="toggle-button ${ui.recordSummaryScope === scope ? "active" : ""}" type="button" data-action="set-record-summary-scope" data-scope="${scope}">${summaryScopeShortLabel(scope)}</button>`)
+      <div class="record-chart-controls" aria-label="汇总图表数字标注">
+        ${items
+          .map(
+            ([key, label]) => `
+              <label>
+                <input class="checkbox" type="checkbox" data-action="toggle-record-chart-series" data-series="${key}" ${labels[key] ? "checked" : ""} />
+                <span>${label}</span>
+              </label>
+            `,
+          )
           .join("")}
       </div>
     `;
   }
 
-  function renderPie(totals, baselineMinutes = null) {
-    const recorded = sumMinutes(Object.values(totals));
-    const targetTotal = Math.max(recorded, Number(baselineMinutes) || 0);
-    const entries = Object.entries(totals).filter(([, minutes]) => minutes > 0);
-    const otherMinutes = Math.max(0, targetTotal - recorded);
-    if (otherMinutes > 0) entries.push(["__other", otherMinutes]);
-    const total = targetTotal || recorded;
-    if (!total) return `<div class="pie-wrap"><div class="pie" data-label="0h"></div></div>`;
-    let cursor = 0;
-    const parts = entries.map(([tagId, minutes], index) => {
-      const start = (cursor / total) * 100;
-      cursor += minutes;
-      const end = (cursor / total) * 100;
-      const meta = statMeta(tagId);
-      const color = meta.color || colors[index % colors.length];
-      return `${color} ${start}% ${end}%`;
+  function renderRecordTrendChart(dates) {
+    const data = recordChartData(dates);
+    const labels = ui.recordChartSeries;
+    const expected = expectedHourTargets();
+    const hasVisibleData = data.some((item) => item.study > 0 || (item.work !== null && item.work > 0) || (item.efficiency !== null && item.efficiency > 0));
+    const hasExpectedData = expected.study > 0 || expected.work > 0;
+    if (!data.length || (!hasVisibleData && !hasExpectedData)) return `<p class="empty compact-empty">所选范围还没有可绘制的数据。</p>`;
+
+    const width = 760;
+    const height = 330;
+    const margin = { top: 34, right: 58, bottom: 56, left: 54 };
+    const chartWidth = width - margin.left - margin.right;
+    const chartHeight = height - margin.top - margin.bottom;
+    const visibleHourValues = data.flatMap((item) => [item.work ?? 0, item.study, expected.study, expected.work]);
+    const maxHour = Math.max(1, Math.ceil(Math.max(...visibleHourValues) * 1.22));
+    const step = chartWidth / data.length;
+    const groupWidth = Math.min(34, Math.max(18, step * 0.72));
+    const activeBars = ["work", "study"];
+    const barGap = 4;
+    const barWidth = Math.max(6, (groupWidth - barGap) / 2);
+    const yHour = (value) => margin.top + chartHeight - (value / maxHour) * chartHeight;
+    const yPercent = (value) => margin.top + chartHeight - (clamp(value, 0, 100) / 100) * chartHeight;
+    const xCenter = (index) => margin.left + step * index + step / 2;
+    const barColor = { work: "#4e7fa8", study: getStudyTag()?.color || "#2f6f73" };
+    const hourTicks = [0, maxHour / 2, maxHour];
+    const percentTicks = [0, 50, 100];
+    const labelEvery = Math.max(1, Math.ceil(data.length / 8));
+    const efficiencySegments = chartLineSegments(data, (item) => item.efficiency !== null, (item, index) => `${xCenter(index)},${yPercent(item.efficiency)}`);
+    const expectedLines = [
+      expected.work > 0 ? { key: "work", value: expected.work, color: barColor.work, label: `期望 ${formatChartHourValue(expected.work)}` } : null,
+      expected.study > 0 ? { key: "study", value: expected.study, color: barColor.study, label: `期望 ${formatChartHourValue(expected.study)}` } : null,
+    ].filter(Boolean);
+
+    return `
+      <section class="record-trend-card">
+        <div class="record-trend-scroll">
+        <svg class="record-trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="近7日工位时长、学习时长和工位时间利用率">
+          <line class="chart-axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + chartHeight}" />
+          <line class="chart-axis" x1="${margin.left}" y1="${margin.top + chartHeight}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" />
+          <line class="chart-axis" x1="${margin.left + chartWidth}" y1="${margin.top}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" />
+          <text class="chart-axis-title" x="${margin.left - 28}" y="${margin.top - 8}">h</text>
+          <text class="chart-axis-title" x="${margin.left + chartWidth + 24}" y="${margin.top - 8}">%</text>
+          ${hourTicks
+            .map((tick) => {
+              const y = yHour(tick);
+              return `
+                <line class="chart-grid" x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" />
+                <text class="chart-y-label left" x="${margin.left - 8}" y="${y + 4}">${formatChartHourTick(tick)}</text>
+              `;
+            })
+            .join("")}
+          ${percentTicks
+            .map((tick) => {
+              const y = yPercent(tick);
+              return `<text class="chart-y-label right" x="${margin.left + chartWidth + 8}" y="${y + 4}">${tick}%</text>`;
+            })
+            .join("")}
+          ${expectedLines
+            .map((line) => {
+              const y = yHour(line.value);
+              return `
+                <line class="chart-expected-line" x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" style="stroke:${line.color}" />
+                <text class="chart-expected-label" x="${margin.left + chartWidth - 4}" y="${Math.max(margin.top + 14, y - 7)}" style="fill:${line.color}">${escapeHtml(line.label)}</text>
+              `;
+            })
+            .join("")}
+          ${data
+            .map((item, index) => {
+              const center = xCenter(index);
+              return activeBars
+                .map((key, barIndex) => {
+                  const value = item[key];
+                  if (value === null) return "";
+                  const x = center - groupWidth / 2 + barIndex * (barWidth + barGap);
+                  const y = yHour(value);
+                  const barHeight = margin.top + chartHeight - y;
+                  const label = labels[key] && value > 0 ? `<text class="chart-value-label" x="${x + barWidth / 2}" y="${Math.max(margin.top + 12, y - 6)}">${formatChartHourValue(value)}</text>` : "";
+                  return `<rect class="chart-bar chart-bar-${key}" x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="4" style="fill:${barColor[key]}" />${label}`;
+                })
+                .join("");
+            })
+            .join("")}
+          ${efficiencySegments.map((points) => `<polyline class="chart-efficiency-line" points="${points}" />`).join("")}
+          ${data
+            .map((item, index) => {
+              if (item.efficiency === null) return "";
+              const cx = xCenter(index);
+              const cy = yPercent(item.efficiency);
+              const label = labels.efficiency ? `<text class="chart-efficiency-label" x="${cx}" y="${Math.max(margin.top + 12, cy - 9)}">${item.efficiency}%</text>` : "";
+              return `<circle class="chart-efficiency-dot" cx="${cx}" cy="${cy}" r="4.2" />${label}`;
+            })
+            .join("")}
+          ${data
+            .map((item, index) => {
+              const show = index === 0 || index === data.length - 1 || index % labelEvery === 0;
+              return show ? `<text class="chart-x-label" x="${xCenter(index)}" y="${height - 20}">${escapeHtml(item.label)}${item.holiday ? " 休" : ""}</text>` : "";
+            })
+            .join("")}
+        </svg>
+        </div>
+        <div class="record-trend-legend">
+          <span><i style="background:#4e7fa8"></i>工位时长</span>
+          <span><i style="background:${getStudyTag()?.color || "#2f6f73"}"></i>学习时长</span>
+          <span><i class="line"></i>工位时间利用率</span>
+          ${expected.work > 0 ? `<span><i class="dash" style="color:#4e7fa8"></i>期望工位</span>` : ""}
+          ${expected.study > 0 ? `<span><i class="dash" style="color:${getStudyTag()?.color || "#2f6f73"}"></i>期望学习</span>` : ""}
+        </div>
+      </section>
+    `;
+  }
+
+  function recordChartData(dates) {
+    return dates.map((itemDate) => {
+      const holiday = isHolidayDate(itemDate);
+      const study = studySummaryForDates([itemDate]).total / 60;
+      const work = holiday ? null : workSummaryForDates([itemDate]).total / 60;
+      return {
+        date: itemDate,
+        label: monthDayText(itemDate),
+        holiday,
+        study,
+        work,
+        efficiency: !holiday && work > 0 ? clamp(Math.round((study / work) * 100), 0, 100) : null,
+      };
     });
-    return `<div class="pie-wrap"><div class="pie" data-label="${formatDuration(total)}" style="background: conic-gradient(${parts.join(",")})"></div></div>`;
+  }
+
+  function formatChartHourTick(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  }
+
+  function formatChartHourValue(value) {
+    const rounded = Math.round((Number(value) || 0) * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}h`;
+  }
+
+  function chartLineSegments(items, predicate, pointForItem) {
+    const segments = [];
+    let current = [];
+    items.forEach((item, index) => {
+      if (predicate(item, index)) {
+        current.push(pointForItem(item, index));
+        return;
+      }
+      if (current.length) segments.push(current.join(" "));
+      current = [];
+    });
+    if (current.length) segments.push(current.join(" "));
+    return segments;
+  }
+
+  function expectedHourTargets() {
+    return {
+      study: state.settings.expectedStudyVisible === false ? 0 : Number(state.settings.expectedStudyHours) || 0,
+      work: state.settings.expectedWorkVisible === false ? 0 : Number(state.settings.expectedWorkHours) || 0,
+    };
+  }
+
+  function renderWorkEfficiencyStrip(scope = "day", date = dateKey()) {
+    const dates = datesInScope(scope, date);
+    const study = studySummaryForDates(dates).total;
+    const work = workSummaryForDates(dates).total;
+    const percent = workEfficiencyPercent(study, work);
+    const isHoliday = scope === "day" && isHolidayDate(date);
+    if (isHoliday) {
+      return `
+        <div class="efficiency-strip holiday-efficiency-strip">
+          <strong>假期</strong>
+          <span>学习 ${formatDuration(study)}</span>
+        </div>
+      `;
+    }
+    return `
+      <div class="efficiency-strip">
+        <span>学习 ${formatDuration(study)}</span>
+        <span>工位 ${formatDuration(work)}</span>
+        <strong>工位时间利用率 ${percent}%</strong>
+      </div>
+    `;
+  }
+
+  function workEfficiencyPercent(studyMinutes, workMinutes) {
+    return workMinutes > 0 ? Math.round((studyMinutes / workMinutes) * 100) : 0;
   }
 
   function renderExecute() {
@@ -733,7 +1265,6 @@
               <p class="hint">${scopeDisplay(state.targetScope)}</p>
             </div>
             <div class="button-row">
-              <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="execute">导出</button>
               <button class="secondary-button add-button" type="button" data-action="add-target" aria-label="新增目标">+</button>
               ${ui.targetEditing ? `<button class="secondary-button" type="button" data-action="migrate-incomplete-targets">迁移</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-target-edit">${ui.targetEditing ? "完成" : "编辑"}</button>
@@ -967,7 +1498,6 @@
               )
               .join("")}
           </div>
-          <button class="secondary-button page-export-button" type="button" data-action="open-export" data-export-scope="review">导出</button>
         </div>
       </section>
     `;
@@ -978,12 +1508,13 @@
     if (scope === "month") return renderMonthlyReviewSection();
     const date = reviewDate(scope);
     const reviewItems = reviewsForScope(scope, date);
+    const holiday = isHolidayDate(date);
     return `
       <section class="section-band review-scope-section" data-review-scope="${scope}">
         ${renderReviewNavigator(scope)}
         <div class="section-title">
           <div>
-            <h2>${reviewLabel(scope)}</h2>
+            <h2>${reviewLabel(scope)}${holiday ? `<span class="holiday-inline-badge">假期</span>` : ""}</h2>
             <p class="hint">${scopeDisplay(scope, date)}</p>
           </div>
           <div class="button-row">
@@ -1001,14 +1532,22 @@
 
   function renderReviewDueReminder(date) {
     const reminders = [];
-    if (isSunday(date)) reminders.push("该进行周复盘了！");
-    if (isLastDayOfMonth(date)) reminders.push("该进行月复盘了！");
+    if (isSunday(date) && !hasCompletedWeeklyReviewForDate(date)) reminders.push("该进行周复盘了！");
+    if (isLastDayOfMonth(date) && !hasCompletedMonthlyReviewForDate(date)) reminders.push("该进行月复盘了！");
     if (!reminders.length) return "";
     return `
       <div class="review-due-reminder" role="note">
         ${reminders.map((text) => `<p>${escapeHtml(text)}</p>`).join("")}
       </div>
     `;
+  }
+
+  function hasCompletedWeeklyReviewForDate(date) {
+    return weeklyReviewHasText(readWeeklyReviewForKey(scopeKey("week", date)));
+  }
+
+  function hasCompletedMonthlyReviewForDate(date) {
+    return monthlyReviewHasText(normalizeMonthlyReview(state.monthlyReviews?.[scopeKey("month", date)] || {}));
   }
 
   function renderWeeklyReviewSection() {
@@ -1039,6 +1578,7 @@
     const lines = [
       study.total > 0 || !options.omitEmpty ? renderWeeklyBriefLine("学习时长", study.total, study.recordedDays) : "",
       work.total > 0 || !options.omitEmpty ? renderWeeklyBriefLine("工位时长", work.total, work.recordedDays) : "",
+      work.total > 0 || !options.omitEmpty ? `<p><strong>工位时间利用率：</strong>${workEfficiencyPercent(study.total, work.total)}%</p>` : "",
     ].join("");
     if (!lines) return "";
     return `
@@ -1127,6 +1667,7 @@
               <th>周次</th>
               <th>学习时长（日均）</th>
               <th>工位时长（日均）</th>
+              <th>工位时间利用率</th>
             </tr>
           </thead>
           <tbody>
@@ -1141,6 +1682,7 @@
                     <td>第${bucket.index + 1}周</td>
                     <td>${formatHourShortText(study.total)}（${formatHourShortText(studyAverage)}）</td>
                     <td>${formatHourShortText(work.total)}（${formatHourShortText(workAverage)}）</td>
+                    <td>${workEfficiencyPercent(study.total, work.total)}%</td>
                   </tr>
                 `;
               })
@@ -1168,12 +1710,13 @@
 
   function renderWeeklyKeyEvents(date) {
     const events = keyEventsForDates(datesInScope("week", date));
+    const holidaySummary = weeklyHolidaySummaryText(date);
     return `
       <section class="monthly-key-card">
         <div class="weekly-card-title">
           <i class="weekly-icon amber"></i>
           <strong>本周关键事件</strong>
-          <span>来自日复盘星标，默认只显示日期和现象，点按可展开原因和措施。</span>
+          <span>${escapeHtml(holidaySummary || "来自日复盘星标，默认只显示日期和现象，点按可展开原因和措施。")}</span>
         </div>
         ${
           events.length
@@ -1189,7 +1732,7 @@
     return `
       <article class="monthly-key-event ${expanded ? "expanded" : ""}">
         <button class="monthly-key-event-head" type="button" data-action="toggle-key-event-detail" data-key-event-id="${escapeAttr(event.key)}">
-          <span><strong>${escapeHtml(shortDateText(event.date))}</strong>${escapeHtml(event.phenomenon || "还没有写现象")}</span>
+          <span><strong>${escapeHtml(shortDateWeekdayText(event.date))}</strong>${escapeHtml(event.phenomenon || "还没有写现象")}</span>
           <i>${expanded ? "▴" : "▾"}</i>
         </button>
         ${expanded ? renderMonthlyKeyEventDetails(event) : ""}
@@ -1488,35 +2031,6 @@
     `;
   }
 
-  function renderStatRows(totals, baselineMinutes = null) {
-    const entries = Object.entries(totals).filter(([, minutes]) => minutes > 0);
-    const recorded = sumMinutes(Object.values(totals));
-    const otherMinutes = Math.max(0, (Number(baselineMinutes) || 0) - recorded);
-    if (otherMinutes > 0) entries.push(["__other", otherMinutes]);
-    if (!entries.length) return `<p class="empty">所选范围还没有时间记录。</p>`;
-    return entries
-      .map(([tagId, minutes]) => {
-        const meta = statMeta(tagId);
-        return `
-          <div class="stat-row">
-            <span class="stat-label"><i class="color-dot" style="background:${meta.color}"></i>${escapeHtml(meta.label)}</span>
-            <strong>${formatDuration(minutes)}</strong>
-          </div>
-        `;
-      })
-      .join("");
-  }
-
-  function statMeta(key) {
-    if (key === "__other") return { label: "其他", color: "#d7ddd4" };
-    if (key === SLEEP_STAT_KEY) return { label: "睡眠", color: "#6f83b7" };
-    if (key === "__loc_dorm") return { label: "宿舍", color: "#4d8b57" };
-    if (key === "__loc_work") return { label: "工位", color: "#4e7fa8" };
-    if (key === "__loc_outdoor") return { label: "户外", color: "#d8b74e" };
-    const tag = getTag(key);
-    return { label: tag?.name || "未分类", color: tag?.color || colors[0] };
-  }
-
   function openModal(title, bodyHtml, afterOpen) {
     closeModal();
     const fragment = $("#modal-template").content.cloneNode(true);
@@ -1666,7 +2180,6 @@
         day: [["review-day", "日复盘", scopeDisplay("day", reviewDate("day"))]],
         week: [
           ["review-week", "周复盘", reviewNavigatorDisplay("week", reviewDate("week"))],
-          ["review-week-events", "本周关键事件", reviewNavigatorDisplay("week", reviewDate("week"))],
         ],
         month: [
           ["review-month", "月复盘", scopeDisplay("month", reviewDate("month"))],
@@ -1681,8 +2194,7 @@
         "记录",
         [
           ["record-logs", "今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`],
-          ["record-location", "地点时间", "宿舍 / 工位 / 户外"],
-          ["record-summary", `${summaryScopeTitle(ui.recordSummaryScope)}`, scopeDisplay(ui.recordSummaryScope, dateKey())],
+          ["record-summary", "近7日汇总", recordChartRangeText()],
         ],
       ],
     ];
@@ -1724,7 +2236,6 @@
     if (item === "execute-habits") return state.habits.length > 0;
     if (item === "review-day") return reviewItemsForExport("day", reviewDate("day")).some(reviewItemHasContent);
     if (item === "review-week") return hasWeeklyReviewExportData(reviewDate("week"));
-    if (item === "review-week-events") return keyEventsForDates(datesInScope("week", reviewDate("week"))).length > 0;
     if (item === "review-month") return hasMonthlyReviewExportData(reviewDate("month"));
     if (item === "review-month-red") return hasMonthlyLightExportData("red", reviewDate("month"));
     if (item === "review-month-green") return hasMonthlyLightExportData("green", reviewDate("month"));
@@ -1732,9 +2243,11 @@
   }
 
   function hasRecordSummaryExportData() {
-    const scope = ui.recordSummaryScope;
-    const date = dateKey();
-    return sumMinutes(Object.values(totalsForLogScope(scope, date))) > 0 || sumMinutes(Object.values(locationTotalsForScope(scope, date))) > 0 || hasHabitDataForScope(scope, date);
+    const dates = recentRecordChartDates();
+    return (
+      dates.some((itemDate) => studySummaryForDates([itemDate]).total > 0 || workSummaryForDates([itemDate]).total > 0) ||
+      habitRateForDates(dates) > 0
+    );
   }
 
   function hasHabitDataForScope(scope, date) {
@@ -1755,6 +2268,10 @@
 
   function weeklyReviewHasText(review) {
     return Boolean(review.red?.trim() || review.green?.trim() || review.summary?.trim() || review.nextDirection?.trim());
+  }
+
+  function monthlyReviewHasText(review) {
+    return Boolean(review.redInsight?.trim() || review.greenInsight?.trim() || review.summary?.trim() || review.nextDirection?.trim());
   }
 
   function hasWeeklyReviewExportData(date) {
@@ -1845,7 +2362,6 @@
       "execute-habits": renderHabitsExport,
       "review-day": renderDayReviewExport,
       "review-week": renderWeekReviewExport,
-      "review-week-events": renderWeekKeyEventsExport,
       "review-month": renderMonthReviewExport,
       "review-month-red": () => renderMonthLightExport("red"),
       "review-month-green": () => renderMonthLightExport("green"),
@@ -1866,6 +2382,7 @@
     if (item === "record-logs") {
       appendClone(app.querySelector('[data-view="record"] > .section-band:first-child'));
       appendClone(app.querySelector(".record-with-axis"));
+      appendClone(app.querySelector(".record-efficiency-band"));
     } else if (item === "record-location") {
       appendClone(app.querySelector(".location-panel"));
     } else if (item === "record-summary") {
@@ -1879,8 +2396,6 @@
       appendClone(app.querySelector('[data-review-scope="day"]'));
     } else if (item === "review-week") {
       appendClone(app.querySelector('[data-review-scope="week"]'));
-    } else if (item === "review-week-events") {
-      appendClone(app.querySelector('[data-review-scope="week"] .monthly-key-card'));
     } else if (item === "review-month") {
       appendClone(app.querySelector('[data-review-scope="month"]'));
     }
@@ -1892,6 +2407,8 @@
 
   function cleanExportClone(fragment, item) {
     syncExportFormValues(fragment);
+    replaceExportNavigators(fragment);
+    $$(".review-due-reminder", fragment).forEach((node) => node.remove());
     $$("[data-draft='true'], .editing-entry", fragment).forEach((node) => node.remove());
     $$(".empty", fragment).forEach((node) => node.remove());
     if (item === "record-logs") {
@@ -1915,9 +2432,23 @@
     $$(".bullet-textarea", fragment).forEach((textarea) => {
       if (!textarea.value.trim()) textarea.closest(".form-row, .monthly-next-card, .monthly-insight-card")?.remove();
     });
-    $$(".weekly-reflection-card, .weekly-next-card, .monthly-next-card, .monthly-light-item, .monthly-insight-card, .review-item, .monthly-key-event", fragment).forEach((node) => {
-      if (node.querySelector("textarea, .review-text, .monthly-stats-table, .weekly-stacked-bar, .entry, .task-group, .habit-panel")) return;
+    $$(".weekly-reflection-card, .weekly-next-card, .monthly-next-card, .monthly-light-item, .monthly-insight-card, .review-item, .monthly-key-event, .monthly-key-card, .weekly-breakdown-card, .monthly-table-card", fragment).forEach((node) => {
+      if (node.querySelector("textarea, .review-text, .monthly-stats-table, .weekly-stacked-bar, .entry, .task-group, .habit-panel, .monthly-light-item, .monthly-key-event")) return;
       node.remove();
+    });
+  }
+
+  function replaceExportNavigators(fragment) {
+    $$(".date-switch-panel", fragment).forEach((panel) => {
+      const value = panel.querySelector(".date-display-field")?.textContent?.trim();
+      if (!value) {
+        panel.remove();
+        return;
+      }
+      const line = document.createElement("p");
+      line.className = "export-date-line";
+      line.textContent = value;
+      panel.replaceWith(line);
     });
   }
 
@@ -1944,14 +2475,12 @@
 
   function renderRecordLogsExport() {
     const logs = state.logs[dateKey()] || [];
-    const segments = state.settings.segments.filter((segment) => logs.some((entry) => entry.segmentId === segment.id));
-    if (!segments.length) return "";
+    const blocks = recordTimelineBlocks(logs, { includeDrafts: false }).filter((block) => block.logs.length);
+    if (!blocks.length) return "";
     return `
       <section class="section-band export-block">
         <div class="section-title"><div><div class="title-with-date"><h2>今日时间追踪</h2><span>${dateKey()} ${weekdayText(dateKey())}</span></div></div></div>
-        <div class="record-timeline-list">
-          ${segments.map((segment) => renderSegmentExport(segment, logs)).join("")}
-        </div>
+        ${renderRecordTimeline(logs, { includeDrafts: false, requireLogs: true })}
       </section>
     `;
   }
@@ -2100,15 +2629,6 @@
     `;
   }
 
-  function renderWeekKeyEventsExport() {
-    if (!hasExportData("review-week-events")) return "";
-    return `
-      <section class="section-band export-block">
-        ${renderWeeklyKeyEvents(reviewDate("week"))}
-      </section>
-    `;
-  }
-
   function renderMonthReviewExport() {
     const date = reviewDate("month");
     const key = scopeKey("month", date);
@@ -2178,19 +2698,20 @@
       canvas.width = Math.ceil(width * scale);
       canvas.height = Math.ceil(height * scale);
       const context = canvas.getContext("2d");
+      if (!context) throw new Error("无法创建导出画布。");
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
       context.scale(scale, scale);
       context.drawImage(image, 0, 0, width, height);
-      return canvas.toDataURL("image/png");
+      const dataUrl = canvas.toDataURL("image/png");
+      if (!dataUrl.startsWith("data:image/png")) throw new Error("导出 PNG 生成失败。");
+      return dataUrl;
     } catch (error) {
-      console.warn("PNG export failed; using SVG preview instead.", error);
-      return svgToDataUrl(svg);
+      console.warn("PNG export failed.", error);
+      throw error;
     } finally {
       URL.revokeObjectURL(url);
     }
-  }
-
-  function svgToDataUrl(svg) {
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   }
 
   function collectExportCss() {
@@ -2236,7 +2757,8 @@
       }
       .review-export-sheet .hint,
       .review-export-sheet .empty,
-      .review-export-sheet .weekly-card-title span {
+      .review-export-sheet .weekly-card-title span,
+      .review-export-sheet .review-due-reminder {
         display: none !important;
       }
       .review-export-sheet .button-row,
@@ -2248,10 +2770,9 @@
       .review-export-sheet .move-button,
       .review-export-sheet .stepper-button,
       .review-export-sheet .toggle-button,
-      .review-export-sheet .summary-controls,
-      .review-export-sheet .summary-scope-tabs,
       .review-export-sheet .date-arrow,
-      .review-export-sheet .date-calendar-button {
+      .review-export-sheet .date-calendar-button,
+      .review-export-sheet .axis-add-time {
         display: none !important;
       }
       .review-export-sheet .date-switch-panel {
@@ -2263,6 +2784,18 @@
       .review-export-sheet .export-page-fragment {
         display: grid;
         gap: 12px;
+      }
+      .review-export-sheet .record-efficiency-band {
+        padding: 10px 12px;
+      }
+      .review-export-sheet .efficiency-strip strong {
+        margin-left: auto;
+      }
+      .review-export-sheet .export-date-line {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
       }
     `;
   }
@@ -2311,6 +2844,11 @@
           "周复盘和月复盘改为常驻可填写文本框，新增总结栏；月复盘总结页显示当月各周总结情况。",
           "多行文字框支持自动增高；周/月复盘文字框换行后会立即显示待输入小圆点，失焦或保存时自动清理空白行，文本框内不再显示默认描述。",
           "导出图片入口按记录、执行、复盘拆分；预览改为克隆当前页面结构，尽量达到截图级效果，空内容会灰掉不可勾选，导出图会自动过滤空卡片和说明文字。",
+          "导出入口回到顶部备份键左侧，并按当前页签自动导出对应内容；导出图中日期切换栏改为纯日期文字，复盘提醒不会进入导出图。",
+          "记录页效率条移动到今日汇总上方并随时间追踪一起导出；文案统一为工位时间利用率，周复盘和月复盘同步显示该指标。",
+          "记录页汇总图从扇形图改为近7日柱状/折线组合图，可勾选显示工位时长、学习时长和工位时间利用率。",
+          "目标记录时长改为按目标迁移链路全局统计到当前日期，补关联历史记录后会计入当前目标总时长。",
+          "优化习惯 100% 完成标记，改为更清晰的实心花形图标。",
         ],
       },
       "v1.5": {
@@ -2687,39 +3225,38 @@
   }
 
   function openLocationsModal() {
-    const locations = normalizeLocations(state.settings.locations);
     openModal(
-      "地点时间轴",
+      "地点",
       `
-        <p class="hint">绿色是宿舍，蓝色是工位，未覆盖的时间自动算作户外。</p>
-        ${renderLocationSection("work", "工位", locations.work)}
-        ${renderLocationSection("dorm", "宿舍", locations.dorm)}
-        <div class="location-legend">
-          <span><i class="legend-dot dorm"></i>宿舍</span>
-          <span><i class="legend-dot work"></i>工位</span>
-          <span><i class="legend-dot outdoor"></i>户外</span>
+        <p class="hint">默认地点会用于左侧时间轴新添加的时间段；当前默认是户外黄色。</p>
+        <div class="location-type-editor" data-location-type-list>
+          ${locationTypes().map((location) => renderLocationTypeRow(location, location.id === defaultLocationId())).join("")}
         </div>
         <div class="button-row">
+          <button class="secondary-button" type="button" data-modal-action="add-location-type">新增地点</button>
           <button class="primary-button" type="button" data-modal-action="save-locations">保存</button>
         </div>
       `,
       (backdrop) => {
         backdrop.addEventListener("click", (event) => {
           const action = event.target.dataset.modalAction;
-          if (action === "add-location-row") {
-            const type = event.target.dataset.locationType;
-            const list = $(`[data-location-list="${type}"]`, backdrop);
-            $(".empty", list)?.remove();
-            list.insertAdjacentHTML("beforeend", renderLocationRow(type));
+          if (action === "add-location-type") {
+            const list = $("[data-location-type-list]", backdrop);
+            list.insertAdjacentHTML("beforeend", renderLocationTypeRow({ id: uid(), name: "新地点", color: colors[list.children.length % colors.length] }, false));
             return;
           }
-          if (action === "delete-location-row") {
-            event.target.closest("[data-location-row]")?.remove();
+          if (action === "delete-location-type") {
+            const rows = $$("[data-location-type-row]", backdrop);
+            const row = event.target.closest("[data-location-type-row]");
+            if (rows.length <= 1 || row?.querySelector("[data-location-default]")?.checked) return;
+            row?.remove();
             return;
           }
           if (action !== "save-locations") return;
+          const next = collectLocationTypes(backdrop);
           setState((draft) => {
-            draft.settings.locations = collectLocationRows(backdrop);
+            draft.settings.locationTypes = next.types;
+            draft.settings.defaultLocationId = next.defaultLocationId;
           });
           closeModal();
         });
@@ -2727,44 +3264,174 @@
     );
   }
 
-  function renderLocationSection(type, title, rows) {
+  function renderLocationTypeRow(location, isDefault = false) {
     return `
-      <section class="location-section">
-        <div class="section-title mini-title">
-          <div><h2>${title}</h2></div>
-          <button class="secondary-button add-button" type="button" data-modal-action="add-location-row" data-location-type="${type}" aria-label="新增${title}记录">+</button>
-        </div>
-        <div class="location-row-list" data-location-list="${type}">
-          ${rows.length ? rows.map((row) => renderLocationRow(type, row)).join("") : `<p class="empty compact-empty">暂无${title}记录。</p>`}
-        </div>
-      </section>
-    `;
-  }
-
-  function renderLocationRow(type, row = null) {
-    return `
-      <div class="location-row" data-location-row data-location-type="${type}" data-location-id="${row?.id || ""}">
-        <label class="form-row"><span class="field-label">到达</span><input type="time" data-location-field="arrive" value="${row?.arrive || (type === "work" ? "09:00" : "22:30")}" /></label>
-        <label class="form-row"><span class="field-label">离开</span><input type="time" data-location-field="leave" value="${row?.leave || (type === "work" ? "18:00" : "06:00")}" /></label>
-        <button class="danger-button" type="button" data-modal-action="delete-location-row">删除</button>
+      <div class="location-type-row" data-location-type-row data-location-id="${escapeAttr(location.id)}">
+        <label class="form-row"><span class="field-label">地点</span><input data-location-type-field="name" value="${escapeAttr(location.name)}" /></label>
+        <label class="form-row compact-color-row"><span class="field-label">颜色</span><input type="color" data-location-type-field="color" value="${escapeAttr(location.color)}" /></label>
+        <label class="default-location-choice">
+          <input class="checkbox" type="radio" name="default-location" data-location-default ${isDefault ? "checked" : ""} />
+          <span>默认</span>
+        </label>
+        <button class="danger-button" type="button" data-modal-action="delete-location-type">删除</button>
       </div>
     `;
   }
 
-  function collectLocationRows(backdrop) {
-    const result = { work: [], dorm: [] };
-    $$("[data-location-row]", backdrop).forEach((row) => {
-      const type = row.dataset.locationType;
-      const arrive = $("[data-location-field='arrive']", row).value;
-      const leave = $("[data-location-field='leave']", row).value;
-      if (!result[type] || !arrive || !leave || arrive === leave) return;
-      result[type].push({
-        id: row.dataset.locationId || uid(),
-        arrive,
-        leave,
-      });
+  function collectLocationTypes(backdrop) {
+    const seen = new Set();
+    const types = [];
+    let defaultLocationIdValue = "";
+    $$("[data-location-type-row]", backdrop).forEach((row, index) => {
+      const id = normalizeLocationTypeId(row.dataset.locationId) || uid();
+      if (seen.has(id)) return;
+      seen.add(id);
+      const name = $("[data-location-type-field='name']", row).value.trim() || "地点";
+      const color = normalizeColor($("[data-location-type-field='color']", row).value, colors[index % colors.length]);
+      types.push({ id, name, color });
+      if ($("[data-location-default]", row).checked) defaultLocationIdValue = id;
     });
-    return result;
+    const normalized = normalizeLocationTypes(types);
+    return {
+      types: normalized,
+      defaultLocationId: normalizeLocationId(defaultLocationIdValue, normalized),
+    };
+  }
+
+  function openLocationTimeModal(seed = null) {
+    const draft = { ...defaultLocationTimeDraft(), ...(seed || {}) };
+    const existing = draft.id ? locationEntriesForDate().find((entry) => entry.id === draft.id) : null;
+    const locationId = draft.id || uid();
+    const locationIds = draft.ids?.length ? draft.ids : [locationId];
+    const isSynced = Boolean(existing?.synced || existing?.source === "sleep");
+    openModal(
+      existing ? "编辑地点时间" : "添加地点时间",
+      `
+        <div class="location-time-editor" data-location-time-id="${escapeAttr(locationId)}">
+          <label class="form-row">
+            <span class="field-label">地点</span>
+            <select data-location-time-field="type">${renderLocationTypeOptions(draft.type)}</select>
+          </label>
+          <div class="grid-2 tight-grid">
+            <label class="form-row"><span class="field-label">开始</span><input type="time" data-location-time-field="start" value="${escapeAttr(draft.start || "")}" /></label>
+            <label class="form-row"><span class="field-label">结束</span><input type="time" data-location-time-field="end" value="${escapeAttr(draft.end || "")}" /></label>
+          </div>
+        </div>
+        <div class="log-edit-buttons">
+          <button class="secondary-button" type="button" data-modal-action="save-location-time">保存</button>
+          ${existing && !isSynced ? `<button class="danger-button" type="button" data-modal-action="delete-location-time">删除</button>` : ""}
+        </div>
+      `,
+      (backdrop) => {
+        backdrop.addEventListener("click", (event) => {
+          const action = event.target.dataset.modalAction;
+          if (action === "delete-location-time") {
+            confirmDelete("确认要删除这段地点时间吗？", () => {
+              setState((stateDraft) => {
+                persistLocationEntry(stateDraft, { id: locationId, ids: locationIds, type: "", start: "", end: "", date: dateKey() });
+              });
+              closeModal();
+            });
+            return;
+          }
+          if (action !== "save-location-time") return;
+          const type = $("[data-location-time-field='type']", backdrop).value;
+          const start = $("[data-location-time-field='start']", backdrop).value;
+          const end = $("[data-location-time-field='end']", backdrop).value;
+          if (!type || !start || (end && start === end)) {
+            alert("请选择地点，并填写有效的开始时间。");
+            return;
+          }
+          setState((stateDraft) => {
+            persistLocationEntry(stateDraft, { id: locationId, ids: locationIds, type, start, end, date: dateKey() });
+          });
+          closeModal();
+        });
+      },
+    );
+  }
+
+  function renderLocationTypeOptions(selectedType = defaultLocationId()) {
+    return locationTypes()
+      .map((location) => `<option value="${escapeAttr(location.id)}" ${location.id === selectedType ? "selected" : ""}>${escapeHtml(location.name)}</option>`)
+      .join("");
+  }
+
+  function locationDraftFromAxis(actionNode) {
+    const ids = parseIdList(actionNode.dataset.locationIds || actionNode.dataset.locationId);
+    const locationId = ids[0] || "";
+    const existing = locationId ? locationEntriesForDate().find((entry) => entry.id === locationId) : null;
+    return {
+      id: existing?.id || "",
+      ids,
+      type: existing?.type || actionNode.dataset.locationType || defaultLocationId(),
+      start: existing?.start || actionNode.dataset.axisStart || "",
+      end: existing?.end || actionNode.dataset.axisEnd || "",
+      source: existing?.source || "",
+      synced: Boolean(existing?.synced),
+    };
+  }
+
+  function locationDraftFromBlock(blockNode) {
+    const ids = parseIdList(blockNode.dataset.locationIds || blockNode.dataset.locationBlock);
+    return {
+      id: ids[0] || "",
+      ids,
+      type: blockNode.dataset.locationType || defaultLocationId(),
+      start: blockNode.dataset.locationStart || "",
+      end: blockNode.dataset.locationRawEnd ?? blockNode.dataset.locationEnd ?? "",
+    };
+  }
+
+  function openLocationSliceInfo(actionNode) {
+    const type = actionNode.dataset.locationType || "";
+    const start = actionNode.dataset.axisStart || "";
+    const end = actionNode.dataset.axisEnd || "";
+    openModal(
+      locationLabel(type),
+      `
+        <div class="location-slice-info" style="--location-color:${locationColor(type)};--location-bg:${locationSoftColor(type, 0.14)}">
+          <i class="color-dot location-dot" style="background:${locationColor(type)}"></i>
+          <strong>${escapeHtml(locationLabel(type))}</strong>
+          <span>${escapeHtml(start)} - ${escapeHtml(end)}</span>
+        </div>
+      `,
+    );
+  }
+
+  function parseIdList(value = "") {
+    return String(value || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function defaultLocationTimeDraft() {
+    const range = recordAxisRange();
+    const entries = normalizeLocationRecords(state.locationLogs?.[dateKey()] || {}).records
+      .filter((entry) => entry.start)
+      .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+    const lastEntry = [...entries].reverse().find((entry) => entry.end);
+    const rangeStart = minutesToTime(range.start);
+    let start = lastEntry?.end || rangeStart;
+    if (timeToMinutes(start) >= range.end) {
+      start = rangeStart;
+    }
+    return {
+      id: "",
+      type: defaultLocationId(),
+      start,
+      end: "",
+    };
+  }
+
+  function currentClockMinutes() {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  }
+
+  function roundToFiveMinutes(minutes) {
+    return Math.min(1435, Math.max(0, Math.round(minutes / 5) * 5));
   }
 
   function openTagsModal() {
@@ -3290,15 +3957,21 @@
     }
     if (action === "open-login") return openLoginModal();
     if (action === "shift-scope-date") return shiftScopeDate(actionNode.dataset.owner, Number(actionNode.dataset.direction) || 0);
-    if (action === "set-record-summary-scope") return setRecordSummaryScope(actionNode.dataset.scope);
-    if (action === "set-summary-mode") return setSummaryMode(actionNode.dataset.owner, actionNode.dataset.mode);
-    if (action === "toggle-summary-other") return toggleSummaryOther(actionNode.dataset.owner, actionNode.checked);
+    if (action === "toggle-record-chart-series") return toggleRecordChartSeries(actionNode.dataset.series, actionNode.checked);
     if (action === "toggle-record-edit") return toggleEditMode("recordEditing");
     if (action === "toggle-target-edit") return toggleEditMode("targetEditing");
     if (action === "toggle-habit-edit") return toggleEditMode("habitEditing");
     if (action === "toggle-review-edit") return toggleEditMode("reviewEditing");
-    if (action === "edit-segments") return openSegmentsModal();
+    if (action === "edit-segments" || action === "edit-locations") return openLocationsModal();
     if (action === "edit-tags") return openTagsModal();
+    if (action === "add-location-time") return openLocationTimeModal();
+    if (action === "set-location-slice") return openLocationSliceInfo(actionNode);
+    if (action === "edit-location-time") return openLocationTimeModal(locationDraftFromBlock(actionNode.closest("[data-location-block]")));
+    if (action === "toggle-location-description") return toggleLocationDescription(actionNode);
+    if (action === "add-holiday") return addHolidayRange();
+    if (action === "edit-holidays") return toggleHolidayEditing();
+    if (action === "save-holidays") return saveHolidayEditing();
+    if (action === "delete-holiday") return deleteHolidayRange(actionNode.closest("[data-holiday-id]").dataset.holidayId);
     if (action === "add-location") return addLocationRecord();
     if (action === "edit-location") return editLocationRecord(actionNode.closest("[data-location-id]").dataset.locationId);
     if (action === "save-location") return saveLocationRecord(actionNode.closest("[data-location-id]"));
@@ -3352,6 +4025,7 @@
     const action = actionNode.dataset.action;
     if (action === "update-log") updateLog(actionNode.closest("[data-log-id]").dataset.logId, actionNode.dataset.field, actionNode.value, false);
     if (action === "update-location") updateLocationDraft(actionNode.closest("[data-location-id]").dataset.locationId, actionNode.dataset.field, actionNode.value, false);
+    if (action === "update-location-description") updateLocationDescriptionDraft(actionNode, actionNode.value);
     if (action === "update-habit") updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, false);
     if (action === "update-review-item") updateReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
     if (action === "update-review-reason") updateReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
@@ -3370,6 +4044,18 @@
     }
     if (actionNode.dataset.action === "update-location") {
       updateLocationDraft(actionNode.closest("[data-location-id]").dataset.locationId, actionNode.dataset.field, actionNode.value, false);
+    }
+    if (actionNode.dataset.action === "update-location-description") {
+      saveLocationDescriptionFromNode(actionNode, { render: false });
+    }
+    if (actionNode.dataset.action === "update-holiday") {
+      updateHolidayRange(actionNode.closest("[data-holiday-id]").dataset.holidayId, actionNode.dataset.field, actionNode.value);
+    }
+    if (actionNode.dataset.action === "update-expected-hours") {
+      updateExpectedHours(actionNode.dataset.field, actionNode.value);
+    }
+    if (actionNode.dataset.action === "toggle-expected-line") {
+      toggleExpectedLine(actionNode.dataset.field, actionNode.checked);
     }
     if (actionNode.dataset.action === "update-habit") {
       updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, true);
@@ -3406,6 +4092,7 @@
     (event) => {
       if (event.target instanceof HTMLTextAreaElement) {
         if (event.target.classList.contains("bullet-textarea")) sanitizeBulletTextarea(event.target, { removeEmptyLines: true, dispatch: true });
+        if (event.target.dataset.action === "update-location-description") saveLocationDescriptionFromNode(event.target, { render: false });
         autoResizeTextarea(event.target);
       }
     },
@@ -3448,7 +4135,7 @@
     ui.locationDrafts.set(id, {
       id,
       date: dateKey(),
-      type: "",
+      type: defaultLocationId(),
       start: "",
       end: "",
     });
@@ -3472,8 +4159,8 @@
     const locationId = locationNode.dataset.locationId;
     const draft = ui.locationDrafts.get(locationId);
     if (!draft) return;
-    if (!draft.type || (!draft.start && !draft.end)) {
-      alert("请先选择地点，并至少填写开始或结束时间。");
+    if (!draft.type || !draft.start || (draft.end && draft.start === draft.end)) {
+      alert("请先选择地点，并填写有效的开始时间。");
       return;
     }
     setState((stateDraft) => {
@@ -3525,6 +4212,52 @@
     render();
   }
 
+  function toggleLocationDescription(actionNode) {
+    const blockNode = actionNode.closest("[data-location-block]");
+    if (!blockNode) return;
+    const ids = parseIdList(blockNode.dataset.locationIds || blockNode.dataset.locationBlock);
+    const noteKey = blockNode.dataset.locationNoteKey || locationAxisKey(ids);
+    if (ui.editingLocationDescriptions.has(noteKey)) {
+      const textarea = $("[data-action='update-location-description']", blockNode);
+      saveLocationDescriptionValue(noteKey, ids, textarea?.value ?? ui.locationDescriptionDrafts.get(noteKey) ?? "");
+      ui.editingLocationDescriptions.delete(noteKey);
+      ui.locationDescriptionDrafts.delete(noteKey);
+    } else {
+      ui.locationDescriptionDrafts.set(noteKey, locationDescriptionForIds(ids));
+      ui.editingLocationDescriptions.add(noteKey);
+    }
+    render();
+  }
+
+  function updateLocationDescriptionDraft(actionNode, value) {
+    const noteKey = actionNode.dataset.locationNoteKey || actionNode.closest("[data-location-note-key]")?.dataset.locationNoteKey;
+    if (!noteKey) return;
+    ui.locationDescriptionDrafts.set(noteKey, value);
+  }
+
+  function saveLocationDescriptionFromNode(actionNode, options = {}) {
+    const blockNode = actionNode.closest("[data-location-block]");
+    const ids = parseIdList(actionNode.dataset.locationNoteIds || blockNode?.dataset.locationIds || "");
+    const noteKey = actionNode.dataset.locationNoteKey || blockNode?.dataset.locationNoteKey || locationAxisKey(ids);
+    saveLocationDescriptionValue(noteKey, ids, actionNode.value ?? ui.locationDescriptionDrafts.get(noteKey) ?? "", options);
+  }
+
+  function saveLocationDescriptionValue(noteKey, ids, value, options = {}) {
+    const cleaned = normalizeLocationDescription(value);
+    const targetIds = ids.length ? ids : [noteKey].filter(Boolean);
+    const primaryId = targetIds[0] || noteKey;
+    if (!primaryId) return;
+    state.locationDescriptions ||= {};
+    state.locationDescriptions[dateKey()] ||= {};
+    if (cleaned) state.locationDescriptions[dateKey()][primaryId] = cleaned;
+    else delete state.locationDescriptions[dateKey()][primaryId];
+    targetIds.slice(1).forEach((id) => delete state.locationDescriptions[dateKey()][id]);
+    if (!Object.keys(state.locationDescriptions[dateKey()]).length) delete state.locationDescriptions[dateKey()];
+    ui.locationDescriptionDrafts.set(noteKey, cleaned);
+    saveState();
+    if (options.render) render();
+  }
+
   function editLog(logId) {
     const log = logsForDate().find((entry) => entry.id === logId);
     if (log) ui.logDrafts.set(logId, { ...log, date: dateKey() });
@@ -3570,23 +4303,63 @@
     });
   }
 
-  function setSummaryMode(owner, mode) {
-    if (!["task", "location"].includes(mode)) return;
-    if (owner === "review") ui.reviewSummaryMode = mode;
-    else ui.recordSummaryMode = mode;
+  function toggleRecordChartSeries(series, checked) {
+    if (!["work", "study", "efficiency"].includes(series)) return;
+    ui.recordChartSeries[series] = Boolean(checked);
     render();
   }
 
-  function setRecordSummaryScope(scope) {
-    if (!["day", "week", "month"].includes(scope)) return;
-    ui.recordSummaryScope = scope;
+  function addHolidayRange() {
+    ui.holidayEditing = true;
+    setState((draft) => {
+      draft.holidays ||= [];
+      draft.holidays.push({ id: uid(), start: dateKey(), end: dateKey() });
+    });
+  }
+
+  function toggleHolidayEditing() {
+    ui.holidayEditing = !ui.holidayEditing;
     render();
   }
 
-  function toggleSummaryOther(owner, checked) {
-    if (owner === "review") ui.reviewSummaryIncludeOther = checked;
-    else ui.recordSummaryIncludeOther = checked;
+  function saveHolidayEditing() {
+    ui.holidayEditing = false;
     render();
+  }
+
+  function deleteHolidayRange(holidayId) {
+    setState((draft) => {
+      draft.holidays = normalizeHolidayRanges(draft.holidays).filter((holiday) => holiday.id !== holidayId);
+    });
+  }
+
+  function updateHolidayRange(holidayId, field, value) {
+    const normalized = normalizeDateKey(value);
+    if (!normalized || !["start", "end"].includes(field)) return;
+    setState((draft) => {
+      const holiday = normalizeHolidayRanges(draft.holidays).find((item) => item.id === holidayId);
+      if (!holiday) return;
+      holiday[field] = normalized;
+      if (holiday.start > holiday.end) {
+        if (field === "start") holiday.end = normalized;
+        else holiday.start = normalized;
+      }
+      draft.holidays = normalizeHolidayRanges([...(draft.holidays || []).filter((item) => item.id !== holidayId), holiday]);
+    });
+  }
+
+  function updateExpectedHours(field, value) {
+    if (!["study", "work"].includes(field)) return;
+    setState((draft) => {
+      draft.settings[field === "study" ? "expectedStudyHours" : "expectedWorkHours"] = normalizedExpectedHours(value);
+    });
+  }
+
+  function toggleExpectedLine(field, checked) {
+    if (!["study", "work"].includes(field)) return;
+    setState((draft) => {
+      draft.settings[field === "study" ? "expectedStudyVisible" : "expectedWorkVisible"] = Boolean(checked);
+    });
   }
 
   function setMonthReviewMode(mode) {
@@ -3639,6 +4412,8 @@
   function clearLocationDrafts() {
     ui.locationDrafts.clear();
     ui.editingLocations.clear();
+    ui.locationDescriptionDrafts.clear();
+    ui.editingLocationDescriptions.clear();
   }
 
   function clearRecordDrafts() {
@@ -4067,11 +4842,12 @@
 
   function targetLoggedMinutes(target, endDate = dateKey()) {
     const ids = targetLinkedIds(target);
-    const startDate = normalizeDateKey(target?.startedAt) || endDate;
-    return datesBetween(startDate, endDate).reduce((sum, itemDate) => {
+    const end = normalizeDateKey(endDate) || dateKey();
+    return Object.entries(state.logs || {}).reduce((sum, [itemDate, logs]) => {
+      if (normalizeDateKey(itemDate) && itemDate > end) return sum;
       return (
         sum +
-        (state.logs[itemDate] || []).reduce((daySum, log) => {
+        (logs || []).reduce((daySum, log) => {
           return ids.has(String(log.targetId || "")) ? daySum + (Number(log.minutes) || 0) : daySum;
         }, 0)
       );
@@ -4122,8 +4898,11 @@
   }
 
   function habitRateForScope(scope = state.reviewScope, date = dateKey()) {
+    return habitRateForDates(datesInScope(scope, date));
+  }
+
+  function habitRateForDates(dates) {
     if (!state.habits.length) return 0;
-    const dates = datesInScope(scope, date);
     let total = 0;
     let completed = 0;
     state.habits.forEach((habit) => {
@@ -4271,13 +5050,44 @@
     });
   }
 
+  function normalizeHolidayRanges(holidays = []) {
+    if (!Array.isArray(holidays)) return [];
+    return holidays
+      .map((holiday) => {
+        if (!holiday || typeof holiday !== "object") return null;
+        const start = normalizeDateKey(holiday.start || holiday.date || todayIso());
+        const end = normalizeDateKey(holiday.end || holiday.start || holiday.date || todayIso());
+        if (!start || !end) return null;
+        return {
+          id: holiday.id || uid(),
+          start: start <= end ? start : end,
+          end: start <= end ? end : start,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end));
+  }
+
+  function isHolidayDate(date = dateKey()) {
+    const key = normalizeDateKey(date);
+    if (!key) return false;
+    return normalizeHolidayRanges(state.holidays).some((holiday) => holiday.start <= key && key <= holiday.end);
+  }
+
+  function normalizedExpectedHours(value) {
+    if (value === "" || value === null || value === undefined) return "";
+    const number = Math.max(0, Number(value) || 0);
+    return number ? String(Math.round(number * 10) / 10) : "";
+  }
+
   function getStudyTag() {
     return state.settings.tags.find((tag) => tag.name === "学习") || state.settings.tags.find((tag) => tag.id === "study") || state.settings.tags.find((tag) => tag.name?.includes("学习"));
   }
 
   function hasCompleteLocationRecord(date) {
+    if (isHolidayDate(date)) return false;
     const locations = normalizeLocationRecords(state.locationLogs?.[date] || {});
-    return [...locations.work, ...locations.dorm].some((entry) => entry.arrive && entry.leave);
+    return locations.records.some((entry) => entry.start && entry.end);
   }
 
   function weeklyBreakdownColor(index, baseColor = colors[0]) {
@@ -4423,6 +5233,49 @@
     return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
   }
 
+  function shortDateWeekdayText(date) {
+    return `${shortDateText(date)}${weekdayText(date)}`;
+  }
+
+  function formatHolidayRange(holiday) {
+    if (!holiday?.start) return "";
+    if (!holiday.end || holiday.start === holiday.end) return shortDateWeekdayText(holiday.start);
+    return `${shortDateWeekdayText(holiday.start)} - ${shortDateWeekdayText(holiday.end)}`;
+  }
+
+  function weeklyHolidaySummaryText(date) {
+    const dates = datesInScope("week", date);
+    const holidayDates = dates.filter((itemDate) => isHolidayDate(itemDate));
+    if (!holidayDates.length) return "";
+    if (holidayDates.length > 4) {
+      const workingDates = dates.filter((itemDate) => !isHolidayDate(itemDate));
+      if (!workingDates.length) return "本周 7 天都是假期。";
+      return `本周除${workingDates.map(shortDateWeekdayText).join("、")}外都是假期。`;
+    }
+    return `本周${holidayDates.length}天假期：${formatHolidayDateGroups(holidayDates)}。`;
+  }
+
+  function formatHolidayDateGroups(dates) {
+    return groupConsecutiveDates(dates)
+      .map((group) => {
+        if (group.length === 1) return shortDateWeekdayText(group[0]);
+        return `${shortDateWeekdayText(group[0])}到${shortDateWeekdayText(group[group.length - 1])}`;
+      })
+      .join("、");
+  }
+
+  function groupConsecutiveDates(dates) {
+    const sorted = [...dates].sort();
+    const groups = [];
+    sorted.forEach((date) => {
+      const previousGroup = groups[groups.length - 1];
+      const previousDate = previousGroup?.[previousGroup.length - 1];
+      if (previousDate && shiftIsoDate(previousDate, 1) === date) previousGroup.push(date);
+      else groups.push([date]);
+    });
+    return groups;
+  }
+
   function targetsForScopeDraft(draft, scope, key) {
     draft.targets[scope] ||= {};
     draft.targets[scope][key] ||= [];
@@ -4471,8 +5324,7 @@
 
   function renderBulletMarkers(value, options = {}) {
     const lines = String(value || "").split("\n");
-    const hasContent = lines.some((line) => line.trim());
-    const showPending = Boolean(options.showPending && hasContent);
+    const showPending = Boolean(options.showPending);
     return (lines.length ? lines : [""])
       .map((line) => {
         const hasBullet = line.trim() || showPending;
@@ -4654,16 +5506,88 @@
     return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
   }
 
+  function locationTypes() {
+    state.settings.locationTypes = normalizeLocationTypes(state.settings.locationTypes);
+    state.settings.defaultLocationId = normalizeLocationId(state.settings.defaultLocationId, state.settings.locationTypes);
+    return state.settings.locationTypes;
+  }
+
+  function normalizeLocationTypes(types = []) {
+    const incoming = Array.isArray(types) ? types : [];
+    const fallbackById = new Map(defaultLocationTypes.map((item) => [item.id, item]));
+    const list = [];
+    const seen = new Set();
+    incoming.forEach((item, index) => {
+      if (!item || typeof item !== "object") return;
+      const fallback = fallbackById.get(item.id) || defaultLocationTypes[index % defaultLocationTypes.length];
+      const id = normalizeLocationTypeId(item.id) || fallback?.id || `location-${index + 1}`;
+      if (seen.has(id)) return;
+      seen.add(id);
+      list.push({
+        id,
+        name: String(item.name || fallback?.name || "地点").trim() || "地点",
+        color: normalizeColor(item.color, fallback?.color || colors[index % colors.length]),
+      });
+    });
+    defaultLocationTypes.forEach((item) => {
+      if (seen.has(item.id)) return;
+      seen.add(item.id);
+      list.push({ ...item });
+    });
+    return list.length ? list : defaultLocationTypes.map((item) => ({ ...item }));
+  }
+
+  function normalizeLocationTypeId(value) {
+    return String(value || "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^\w-]/g, "")
+      .slice(0, 48);
+  }
+
+  function normalizeLocationId(value, types = normalizeLocationTypes()) {
+    const ids = new Set(types.map((item) => item.id));
+    if (ids.has(value)) return value;
+    if (ids.has(DEFAULT_LOCATION_ID)) return DEFAULT_LOCATION_ID;
+    return types[0]?.id || DEFAULT_LOCATION_ID;
+  }
+
+  function normalizeColor(value, fallback = colors[0]) {
+    return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value) : fallback;
+  }
+
+  function defaultLocationId() {
+    return normalizeLocationId(state.settings.defaultLocationId, locationTypes());
+  }
+
+  function locationMeta(type) {
+    if (!type || type === "empty") return { id: "empty", name: "未计入地点", color: "#d8ddd2" };
+    return locationTypes().find((item) => item.id === type) || defaultLocationTypes.find((item) => item.id === type) || { id: type, name: "地点", color: colors[0] };
+  }
+
   function locationLabel(type) {
-    return { dorm: "宿舍", work: "工位", outdoor: "户外" }[type] || "户外";
+    return locationMeta(type).name;
   }
 
   function locationColor(type) {
-    return { dorm: "#4d8b57", work: "#4e7fa8", outdoor: "#d8b74e" }[type] || colors[0];
+    return locationMeta(type).color;
+  }
+
+  function locationSoftColor(type, alpha = 0.14) {
+    return hexToRgba(locationColor(type), alpha);
+  }
+
+  function hexToRgba(hex, alpha = 1) {
+    const normalized = normalizeColor(hex, colors[0]).replace("#", "");
+    const value = Number.parseInt(normalized, 16);
+    const red = (value >> 16) & 255;
+    const green = (value >> 8) & 255;
+    const blue = value & 255;
+    return `rgba(${red}, ${green}, ${blue}, ${clamp(alpha, 0, 1)})`;
   }
 
   function formatLocationRange(entry) {
-    return `${entry.start || ""} - ${entry.end || ""}`;
+    return `${entry.start || ""} - ${entry.openEnd ? "" : entry.end || ""}`;
   }
 
   function recordAxisRange() {
@@ -4683,26 +5607,50 @@
       });
     });
     const points = Array.from(boundaries).sort((a, b) => a - b);
-    return points.slice(0, -1).map((point, index) => {
+    const slices = points.slice(0, -1).map((point, index) => {
       const next = points[index + 1];
-      const type = locationTypeAt((point + next) / 2, date, intervals);
+      const interval = locationIntervalAt((point + next) / 2, date, intervals);
+      const type = interval?.type || DEFAULT_LOCATION_ID;
+      const id = interval?.id || autoOutdoorId(date, point, next);
       return {
+        id,
+        ids: [id],
         type,
         start: point,
         end: next,
+        auto: !interval,
         percent: ((next - point) / (end - start)) * 100,
       };
     });
+    return mergeAdjacentLocationSlices(slices, start, end);
+  }
+
+  function mergeAdjacentLocationSlices(slices, rangeStart, rangeEnd) {
+    const merged = [];
+    slices.forEach((slice) => {
+      const previous = merged[merged.length - 1];
+      if (previous && previous.type === slice.type && previous.end === slice.start) {
+        previous.end = slice.end;
+        previous.ids = Array.from(new Set([...(previous.ids || []), ...(slice.ids || [])]));
+        previous.id ||= slice.id;
+        previous.auto = Boolean(previous.auto && slice.auto);
+        return;
+      }
+      merged.push({ ...slice, ids: [...(slice.ids || [])] });
+    });
+    return merged.map((slice) => ({
+      ...slice,
+      percent: ((slice.end - slice.start) / (rangeEnd - rangeStart)) * 100,
+    }));
   }
 
   function locationIntervals(date = dateKey()) {
     const records = normalizeLocationRecords(state.locationLogs?.[date] || {});
-    const overriddenSleepIds = new Set([...records.work, ...records.dorm].map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
-    const locations = normalizeLocations(state.locationLogs?.[date] || {});
+    const displayRecords = inferLocationRecordEnds(records.records, date);
+    const overriddenSleepIds = new Set(records.records.map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
     return [
       ...sleepDormIntervalsForDate(date).filter((interval) => !overriddenSleepIds.has(interval.id)),
-      ...locations.dorm.flatMap((row) => splitLocationRange("dorm", row.arrive, row.leave)),
-      ...locations.work.flatMap((row) => splitLocationRange("work", row.arrive, row.leave)),
+      ...displayRecords.flatMap((row) => splitLocationRange(row.type, row.start, row.end, row.id, row)),
     ];
   }
 
@@ -4720,25 +5668,65 @@
   }
 
   function normalizeLocationRecords(locations = {}) {
-    if (Array.isArray(locations.work) || Array.isArray(locations.dorm)) {
-      return {
-        work: (locations.work || []).map(normalizeLocationRecordRow).filter(Boolean),
-        dorm: (locations.dorm || []).map(normalizeLocationRecordRow).filter(Boolean),
-      };
+    const records = [];
+    const pushRows = (rows, type) => {
+      (rows || []).forEach((row) => {
+        const normalized = normalizeLocationRecordRow(row, type);
+        if (normalized) records.push(normalized);
+      });
+    };
+    if (Array.isArray(locations.records)) pushRows(locations.records);
+    Object.entries(locations || {}).forEach(([type, rows]) => {
+      if (type === "records" || !Array.isArray(rows)) return;
+      pushRows(rows, type);
+    });
+    if (!records.length && (locations.workArrive || locations.dormArrive)) {
+      pushRows(normalizeLocations(locations).work, "work");
+      pushRows(normalizeLocations(locations).dorm, "dorm");
     }
-    return normalizeLocations(locations);
+    return { records };
   }
 
-  function normalizeLocationRecordRow(row) {
+  function normalizeLocationRecordRow(row, typeFallback = "") {
     if (!row) return null;
-    const arrive = row.arrive ?? row.start ?? "";
-    const leave = row.leave ?? row.end ?? "";
-    if (!arrive && !leave) return null;
+    const start = row.start ?? row.arrive ?? "";
+    const end = row.end ?? row.leave ?? "";
+    if (!start && !end) return null;
     return {
       id: row.id || uid(),
-      arrive,
-      leave,
+      type: row.type || typeFallback || DEFAULT_LOCATION_ID,
+      start,
+      end,
+      source: row.source || "",
+      synced: Boolean(row.synced),
     };
+  }
+
+  function locationDisplayRecordsForDate(date = dateKey(), source = null) {
+    const locations = normalizeLocationRecords(source || state.locationLogs?.[date] || {});
+    return inferLocationRecordEnds(locations.records, date);
+  }
+
+  function inferLocationRecordEnds(records = [], date = dateKey()) {
+    const range = recordAxisRange();
+    const rangeEnd = minutesToTime(range.end);
+    const sorted = (records || [])
+      .filter((row) => row.type && row.start)
+      .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+    return sorted.map((row, index) => {
+      const rawEnd = row.end || "";
+      const nextStart = sorted
+        .slice(index + 1)
+        .map((item) => item.start)
+        .find((start) => timeToMinutes(start) > timeToMinutes(row.start));
+      const end = rawEnd || nextStart || rangeEnd;
+      return {
+        ...row,
+        rawEnd,
+        end,
+        openEnd: !rawEnd,
+      };
+    });
   }
 
   function normalizeLocationRow(row) {
@@ -4752,69 +5740,172 @@
 
   function locationEntriesForDate(date = dateKey(), source = null) {
     const locations = normalizeLocationRecords(source || state.locationLogs?.[date] || {});
-    const overriddenSleepIds = new Set([...locations.work, ...locations.dorm].map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
+    const displayRecords = inferLocationRecordEnds(locations.records, date);
+    const overriddenSleepIds = new Set(locations.records.map((row) => row.id).filter((id) => String(id).startsWith("sleep-dorm-")));
     return [
-      ...locations.work.map((row) => ({ id: row.id, type: "work", start: row.arrive, end: row.leave })),
-      ...locations.dorm.map((row) => ({ id: row.id, type: "dorm", start: row.arrive, end: row.leave })),
+      ...displayRecords.map((row) => ({
+        id: row.id,
+        type: row.type,
+        start: row.start,
+        end: row.end,
+        rawEnd: row.rawEnd,
+        openEnd: row.openEnd,
+        source: row.source,
+        synced: row.synced,
+      })),
       ...sleepDormEntriesForDate(date).filter((entry) => !overriddenSleepIds.has(entry.id)),
     ].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+  }
+
+  function mergedLocationEntriesForDate(date = dateKey(), source = null) {
+    const entries = locationEntriesForDate(date, source)
+      .filter((entry) => entry.type && entry.start && entry.end)
+      .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+    const merged = [];
+    entries.forEach((entry) => {
+      const previous = merged[merged.length - 1];
+      const canMerge =
+        previous &&
+        previous.type === entry.type &&
+        !previous.synced &&
+        !entry.synced &&
+        previous.end === entry.start;
+      if (canMerge) {
+        previous.end = entry.end;
+        previous.rawEnd = entry.rawEnd;
+        previous.openEnd = entry.openEnd;
+        previous.ids.push(entry.id);
+        return;
+      }
+      merged.push({ ...entry, ids: [entry.id] });
+    });
+    return merged;
   }
 
   function persistLocationEntry(draft, entry) {
     draft.locationLogs ||= {};
     const date = entry.date || dateKey();
     const daily = normalizeLocationRecords(draft.locationLogs[date] || {});
-    daily.work = daily.work.filter((row) => row.id !== entry.id);
-    daily.dorm = daily.dorm.filter((row) => row.id !== entry.id);
-    if (entry.type && (entry.start || entry.end)) {
-      daily[entry.type].push({ id: entry.id, arrive: entry.start || "", leave: entry.end || "" });
+    const ids = entry.ids?.length ? entry.ids : [entry.id];
+    daily.records = daily.records.filter((row) => !ids.includes(row.id));
+    const remap = new Map();
+    if (!entry.type) removeLocationDescriptions(draft, date, ids);
+    if (entry.type && entry.start && (!entry.end || entry.start !== entry.end)) {
+      daily.records.push({ id: entry.id, type: entry.type, start: entry.start || "", end: entry.end || "" });
+      ids.filter((id) => id !== entry.id).forEach((id) => remap.set(id, entry.id));
     }
+    mergeAdjacentLocationRecords(daily).forEach((targetId, sourceId) => remap.set(sourceId, targetId));
+    remapLocationLogSegments(draft, date, remap);
+    remapLocationDescriptions(draft, date, remap);
     draft.locationLogs[date] = daily;
   }
 
-  function splitLocationRange(type, startValue, endValue) {
+  function mergeAdjacentLocationRecords(daily) {
+    daily.records = (daily.records || [])
+      .filter((row) => row.type && row.start && (!row.end || row.start !== row.end))
+      .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+    const remap = new Map();
+    const merged = [];
+    daily.records.forEach((row) => {
+      const previous = merged[merged.length - 1];
+      const canMerge =
+        previous &&
+        previous.type === row.type &&
+        previous.end &&
+        row.end &&
+        !previous.synced &&
+        !row.synced &&
+        previous.end === row.start;
+      if (canMerge) {
+        previous.end = row.end;
+        remap.set(row.id, previous.id);
+        return;
+      }
+      merged.push(row);
+    });
+    daily.records = merged;
+    return remap;
+  }
+
+  function remapLocationLogSegments(draft, date, remap) {
+    if (!remap.size) return;
+    (draft.logs?.[date] || []).forEach((log) => {
+      if (remap.has(log.segmentId)) log.segmentId = remap.get(log.segmentId);
+    });
+    ui.logDrafts.forEach((log) => {
+      if (log.date === date && remap.has(log.segmentId)) log.segmentId = remap.get(log.segmentId);
+    });
+  }
+
+  function remapLocationDescriptions(draft, date, remap) {
+    if (!remap.size) return;
+    const descriptions = draft.locationDescriptions?.[date];
+    if (!descriptions) return;
+    remap.forEach((targetId, sourceId) => {
+      if (!descriptions[sourceId]) return;
+      descriptions[targetId] = [descriptions[targetId], descriptions[sourceId]].filter(Boolean).join("\n");
+      delete descriptions[sourceId];
+    });
+  }
+
+  function removeLocationDescriptions(draft, date, ids = []) {
+    const descriptions = draft.locationDescriptions?.[date];
+    if (!descriptions) return;
+    ids.forEach((id) => delete descriptions[id]);
+    if (!Object.keys(descriptions).length) delete draft.locationDescriptions[date];
+  }
+
+  function splitLocationRange(type, startValue, endValue, id = "", source = {}) {
     const start = timeToMinutes(startValue);
     const end = timeToMinutes(endValue);
     if (start === end) return [];
-    if (end > start) return [{ type, start, end }];
+    const base = { id, type, source: source.source || "", synced: Boolean(source.synced) };
+    if (end > start) return [{ ...base, start, end }];
     return [
-      { type, start, end: 1440 },
-      { type, start: 0, end },
+      { ...base, start, end: 1440 },
+      { ...base, start: 0, end },
     ];
   }
 
-  function locationTypeAt(minute, date = dateKey(), cachedIntervals = null) {
+  function locationIntervalAt(minute, date = dateKey(), cachedIntervals = null) {
     const normalized = ((minute % 1440) + 1440) % 1440;
     const intervals = cachedIntervals || locationIntervals(date);
-    const work = intervals.find((interval) => interval.type === "work" && normalized >= interval.start && normalized < interval.end);
-    if (work) return "work";
-    const dorm = intervals.find((interval) => interval.type === "dorm" && normalized >= interval.start && normalized < interval.end);
-    if (dorm) return "dorm";
-    return "outdoor";
+    for (let index = intervals.length - 1; index >= 0; index -= 1) {
+      const interval = intervals[index];
+      if (normalized >= interval.start && normalized < interval.end) return interval;
+    }
+    return null;
+  }
+
+  function locationTypeAt(minute, date = dateKey(), cachedIntervals = null) {
+    return locationIntervalAt(minute, date, cachedIntervals)?.type || DEFAULT_LOCATION_ID;
+  }
+
+  function emptyLocationTotals() {
+    const totals = { __loc_dorm: 0, __loc_work: 0, __loc_outdoor: 0 };
+    if (state?.settings) locationTypes().forEach((item) => (totals[`__loc_${item.id}`] ||= 0));
+    return totals;
   }
 
   function locationTotalsForScope(scope, date = dateKey()) {
-    return datesInScope(scope, date).slice(0, baselineDaysInScope(scope)).reduce(
-      (totals, itemDate) => {
-        const daily = locationTotalsForDay(itemDate);
-        totals.__loc_dorm += daily.__loc_dorm;
-        totals.__loc_work += daily.__loc_work;
-        totals.__loc_outdoor += daily.__loc_outdoor;
-        return totals;
-      },
-      { __loc_dorm: 0, __loc_work: 0, __loc_outdoor: 0 },
-    );
+    return datesInScope(scope, date).slice(0, baselineDaysInScope(scope)).reduce((totals, itemDate) => {
+      const daily = locationTotalsForDay(itemDate);
+      Object.entries(daily).forEach(([key, minutes]) => {
+        totals[key] = (totals[key] || 0) + minutes;
+      });
+      return totals;
+    }, emptyLocationTotals());
   }
 
   function locationTotalsForDay(date = dateKey()) {
+    if (isHolidayDate(date)) return emptyLocationTotals();
     const slices = locationSlicesForRange(0, 1440, date);
-    return slices.reduce(
-      (totals, slice) => {
-        totals[`__loc_${slice.type}`] += slice.end - slice.start;
-        return totals;
-      },
-      { __loc_dorm: 0, __loc_work: 0, __loc_outdoor: 0 },
-    );
+    return slices.reduce((totals, slice) => {
+      if (!slice.type || slice.type === "empty") return totals;
+      const key = `__loc_${slice.type}`;
+      totals[key] = (totals[key] || 0) + slice.end - slice.start;
+      return totals;
+    }, emptyLocationTotals());
   }
 
   function renderHabitTrail(habit) {

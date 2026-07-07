@@ -102,6 +102,7 @@
       study: true,
       efficiency: true,
     },
+    recordChartWindowOffset: 0,
     monthReviewMode: "red",
     expandedKeyEvents: new Set(),
   };
@@ -401,6 +402,8 @@
     if (state.activeTab === "execute") renderExecute();
     if (state.activeTab === "review") renderReview();
     prepareTextareas($("#app"));
+    bindRecordChartDrag($("#app"));
+    triggerChartWaterMotion();
   }
 
   function renderRecord() {
@@ -434,7 +437,7 @@
           <div class="section-title compact-title">
             <div>
               <div class="summary-heading-line">
-                <h2>近7日汇总</h2>
+                <h2>学习时间统计</h2>
               </div>
               <p class="hint">${recordChartRangeText()}</p>
             </div>
@@ -462,7 +465,7 @@
             .map((slice) => renderAxisBoundaryLabel(slice.end, range.start, total))
             .join("")}
         </div>
-        <button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>
+        ${slices.some((slice) => slice.auto) ? `<button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>` : ""}
       </aside>
     `;
   }
@@ -486,8 +489,8 @@
       .map((slice, index) => {
         const key = locationAxisKey(slice.ids || []);
         let block = blockByAxisKey.get(key) || null;
-        if (!block && slice.type === DEFAULT_LOCATION_ID) {
-          block = autoOutdoorBlockFromSlice(slice, logs, draftLogs);
+        if (!block && slice.type) {
+          block = timelineBlockFromSlice(slice, logs, draftLogs);
           if (options.requireLogs && !block.logs.length && !block.drafts.length && !locationDescriptionForIds(block.ids || [block.id])) block = null;
         }
         return renderTimelineRow(slice, index, slices.length, range.start, total, block);
@@ -497,7 +500,7 @@
       <div class="record-with-axis">
         ${rows}
         ${legacyBlocks.map((block) => renderLegacyTimelineRow(block)).join("")}
-        <button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>
+        ${slices.some((slice) => slice.auto) ? `<button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>` : ""}
       </div>
     `;
   }
@@ -510,6 +513,7 @@
     return `
       <div class="timeline-row" style="--row-min:${rowMin}px;--row-top-gap:${topGap};--row-bottom-gap:${bottomGap}">
         <div class="axis-row-cell">
+          ${index === 0 ? renderAxisStartLabel(slice.start) : ""}
           ${renderAxisSlice(slice, index, count)}
           ${index < count - 1 ? renderAxisBoundaryLabel(slice.end) : ""}
         </div>
@@ -565,6 +569,12 @@
     `;
   }
 
+  function renderAxisStartLabel(minute) {
+    return `
+      <span class="axis-boundary-label axis-start-label">${escapeHtml(minutesToTime(minute))}</span>
+    `;
+  }
+
   function recordTimelineBlocks(logs, options = {}) {
     const includeDrafts = options.includeDrafts !== false;
     const entries = mergedLocationEntriesForDate(dateKey()).filter((entry) => entry.type && entry.start && entry.end);
@@ -576,66 +586,84 @@
         .flatMap((slice) => slice.ids || [slice.id])
         .filter((id) => String(id || "").startsWith("auto-outdoor-")),
     );
-    const blocks = entries.map((entry) => ({
-      id: entry.id,
-      ids: entry.ids || [entry.id],
-      type: entry.type,
-      title: locationLabel(entry.type),
-      start: entry.start,
-      end: entry.end,
-      rawEnd: entry.rawEnd ?? entry.end,
-      openEnd: Boolean(entry.openEnd),
-      source: entry.source,
-      logs: logs.filter((log) => (entry.ids || [entry.id]).includes(log.segmentId)),
-      drafts: draftLogs.filter((log) => (entry.ids || [entry.id]).includes(log.segmentId)),
-    }));
+    const blocks = entries.map((entry) => {
+      const ids = entry.ids || [entry.id];
+      const persistedLogs = logs.filter((log) => ids.includes(log.segmentId));
+      return {
+        id: entry.id,
+        ids,
+        type: entry.type,
+        title: locationLabel(entry.type),
+        start: entry.start,
+        end: entry.end,
+        rawEnd: entry.rawEnd ?? entry.end,
+        openEnd: Boolean(entry.openEnd),
+        source: entry.source,
+        logs: persistedLogs,
+        drafts: draftLogsForSegment(draftLogs, ids, persistedLogs),
+      };
+    });
 
     const legacyBlocks = state.settings.segments
-      .map((segment) => ({
-        id: segment.id,
-        type: "",
-        title: `未分配地点 · ${segment.name}`,
-        start: segment.start,
-        end: segment.end,
-        legacy: true,
-        logs: logs.filter((log) => log.segmentId === segment.id),
-        drafts: draftLogs.filter((log) => log.segmentId === segment.id),
-      }))
+      .map((segment) => {
+        const ids = [segment.id];
+        const persistedLogs = logs.filter((log) => ids.includes(log.segmentId));
+        return {
+          id: segment.id,
+          type: "",
+          title: `未分配地点 · ${segment.name}`,
+          start: segment.start,
+          end: segment.end,
+          legacy: true,
+          logs: persistedLogs,
+          drafts: draftLogsForSegment(draftLogs, ids, persistedLogs),
+        };
+      })
       .filter((block) => block.logs.length || block.drafts.length);
 
     const legacyIds = new Set(state.settings.segments.map((segment) => segment.id));
     const orphanIds = Array.from(
       new Set([...logs, ...draftLogs].map((log) => log.segmentId).filter((id) => id && !knownIds.has(id) && !legacyIds.has(id) && !autoOutdoorIds.has(id))),
     );
-    const orphanBlocks = orphanIds.map((id) => ({
-      id,
-      type: "",
-      title: "未分配地点",
-      start: "",
-      end: "",
-      legacy: true,
-      logs: logs.filter((log) => log.segmentId === id),
-      drafts: draftLogs.filter((log) => log.segmentId === id),
-    }));
+    const orphanBlocks = orphanIds.map((id) => {
+      const ids = [id];
+      const persistedLogs = logs.filter((log) => ids.includes(log.segmentId));
+      return {
+        id,
+        type: "",
+        title: "未分配地点",
+        start: "",
+        end: "",
+        legacy: true,
+        logs: persistedLogs,
+        drafts: draftLogsForSegment(draftLogs, ids, persistedLogs),
+      };
+    });
 
     return [...blocks, ...legacyBlocks, ...orphanBlocks].filter((block) => block.logs.length || block.drafts.length || !block.legacy);
   }
 
-  function autoOutdoorBlockFromSlice(slice, logs, draftLogs) {
+  function timelineBlockFromSlice(slice, logs, draftLogs) {
     const id = slice.id || autoOutdoorId(dateKey(), slice.start, slice.end);
     const ids = slice.ids?.length ? slice.ids : [id];
+    const persistedLogs = logs.filter((log) => ids.includes(log.segmentId));
     return {
       id,
       ids,
-      type: DEFAULT_LOCATION_ID,
-      title: locationLabel(DEFAULT_LOCATION_ID),
+      type: slice.type || DEFAULT_LOCATION_ID,
+      title: locationLabel(slice.type || DEFAULT_LOCATION_ID),
       start: minutesToTime(slice.start),
       end: minutesToTime(slice.end),
       rawEnd: minutesToTime(slice.end),
       auto: Boolean(slice.auto),
-      logs: logs.filter((log) => ids.includes(log.segmentId)),
-      drafts: draftLogs.filter((log) => ids.includes(log.segmentId)),
+      logs: persistedLogs,
+      drafts: draftLogsForSegment(draftLogs, ids, persistedLogs),
     };
+  }
+
+  function draftLogsForSegment(draftLogs, ids, persistedLogs = []) {
+    const persistedIds = new Set(persistedLogs.map((log) => log.id));
+    return draftLogs.filter((log) => ids.includes(log.segmentId) && !persistedIds.has(log.id));
   }
 
   function renderLocationBlock(block) {
@@ -762,6 +790,7 @@
 
   function renderRecordBottomSettings() {
     const holidays = normalizeHolidayRanges(state.holidays);
+    const visibleHolidays = holidays.filter((holiday) => holiday.end >= dateKey());
     return `
       <section class="section-band record-bottom-settings">
         <div class="expected-hours-panel">
@@ -790,9 +819,9 @@
           <div class="holiday-range-list ${ui.holidayEditing ? "editing" : "display"}">
             ${
               ui.holidayEditing
-                ? `${holidays.map(renderHolidayRangeRow).join("") || `<p class="empty compact-empty">暂无假期。</p>`}<button class="primary-button holiday-save-button" type="button" data-action="save-holidays">保存</button>`
-                : holidays.length
-                  ? holidays.map(renderHolidayRangeDisplay).join("")
+                ? `${visibleHolidays.map(renderHolidayRangeRow).join("") || `<p class="empty compact-empty">暂无假期。</p>`}<button class="primary-button holiday-save-button" type="button" data-action="save-holidays">保存</button>`
+                : visibleHolidays.length
+                  ? visibleHolidays.map(renderHolidayRangeDisplay).join("")
                   : ""
             }
           </div>
@@ -828,7 +857,11 @@
 
   function renderSegment(segment, logs) {
     const segmentLogs = logs.filter((entry) => entry.segmentId === segment.id);
-    const draftLogs = [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey() && entry.segmentId === segment.id);
+    const draftLogs = draftLogsForSegment(
+      [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey()),
+      [segment.id],
+      segmentLogs,
+    );
     return `
       <section class="segment-panel" data-segment="${segment.id}">
         <div class="segment-header">
@@ -1018,10 +1051,6 @@
     const dates = recentRecordChartDates();
     return `
       <section class="summary-scope-card active-summary-scope">
-        <div class="summary-scope-title">
-          <h3>近7日汇总</h3>
-          <span>${escapeHtml(recordChartRangeText())}</span>
-        </div>
         ${renderRecordTrendChart(dates)}
         <div class="stat-list habit-rate-row">
           <div class="stat-row">
@@ -1034,12 +1063,49 @@
   }
 
   function recentRecordChartDates() {
-    return lastNDates(dateKey(), 7);
+    return weekKeys(ui.recordChartWindowOffset);
   }
 
   function recordChartRangeText() {
     const dates = recentRecordChartDates();
     return `${dates[0]} 至 ${dates[dates.length - 1]}`;
+  }
+
+  function weekKeys(offset = ui.recordChartWindowOffset || 0) {
+    const endKey = offsetDateKey(latestRecordKey(), offset);
+    return weekKeysEndingAt(endKey);
+  }
+
+  function offsetDateKey(key, offset) {
+    return isoFromDate(addDays(parseDateKey(key), -Math.max(0, Number(offset) || 0)));
+  }
+
+  function weekKeysEndingAt(endKey) {
+    const endDate = parseDateKey(endKey);
+    return Array.from({ length: 7 }, (_, index) => {
+      return isoFromDate(addDays(endDate, index - 6));
+    });
+  }
+
+  function latestRecordKey() {
+    const candidates = new Set();
+    Object.entries(state.logs || {}).forEach(([key, logs]) => {
+      if (!normalizeDateKey(key)) return;
+      if ((logs || []).some((entry) => Number(entry.minutes) > 0)) candidates.add(key);
+    });
+    Object.entries(state.locationLogs || {}).forEach(([key, locations]) => {
+      if (!normalizeDateKey(key)) return;
+      if (normalizeLocationRecords(locations).records.some((entry) => entry.start || entry.end)) candidates.add(key);
+    });
+    (state.habits || []).forEach((habit) => {
+      Object.entries(habit.records || {}).forEach(([key, value]) => {
+        if (normalizeDateKey(key) && Number(value) > 0) candidates.add(key);
+      });
+    });
+    return Array.from(candidates)
+      .filter((key) => studySummaryForDates([key]).total > 0 || workSummaryForDates([key]).total > 0 || habitRateForDates([key]) > 0)
+      .sort()
+      .at(-1) || dateKey();
   }
 
   function renderRecordChartControls() {
@@ -1071,28 +1137,38 @@
     const expected = expectedHourTargets();
     const hasVisibleData = data.some((item) => item.study > 0 || (item.work !== null && item.work > 0) || (item.efficiency !== null && item.efficiency > 0));
     const hasExpectedData = expected.study > 0 || expected.work > 0;
-    if (!data.length || (!hasVisibleData && !hasExpectedData)) return `<p class="empty compact-empty">所选范围还没有可绘制的数据。</p>`;
+    if (!data.length || (!hasVisibleData && !hasExpectedData)) {
+      return `
+        <section class="record-trend-card">
+          <div class="record-trend-scroll record-trend-empty-wrap" data-record-chart-drag="true">
+            <p class="empty compact-empty">所选范围还没有可绘制的数据。</p>
+          </div>
+        </section>
+      `;
+    }
 
-    const width = 760;
-    const height = 330;
-    const margin = { top: 34, right: 58, bottom: 56, left: 54 };
+    const width = 520;
+    const height = 310;
+    const margin = { top: 34, right: 44, bottom: 52, left: 42 };
     const chartWidth = width - margin.left - margin.right;
     const chartHeight = height - margin.top - margin.bottom;
     const visibleHourValues = data.flatMap((item) => [item.work ?? 0, item.study, expected.study, expected.work]);
     const maxHour = Math.max(1, Math.ceil(Math.max(...visibleHourValues) * 1.22));
     const step = chartWidth / data.length;
-    const groupWidth = Math.min(34, Math.max(18, step * 0.72));
-    const activeBars = ["work", "study"];
-    const barGap = 4;
-    const barWidth = Math.max(6, (groupWidth - barGap) / 2);
+    const groupWidth = Math.min(28, Math.max(18, step * 0.46));
+    const studyWidth = groupWidth;
     const yHour = (value) => margin.top + chartHeight - (value / maxHour) * chartHeight;
     const yPercent = (value) => margin.top + chartHeight - (clamp(value, 0, 100) / 100) * chartHeight;
     const xCenter = (index) => margin.left + step * index + step / 2;
-    const barColor = { work: "#4e7fa8", study: getStudyTag()?.color || "#2f6f73" };
+    const barColor = { work: "#39bff2", study: getStudyTag()?.color || "#2f6f73" };
+    const studyFillColor = barColor.work;
     const hourTicks = [0, maxHour / 2, maxHour];
     const percentTicks = [0, 50, 100];
     const labelEvery = Math.max(1, Math.ceil(data.length / 8));
-    const efficiencySegments = chartLineSegments(data, (item) => item.efficiency !== null, (item, index) => `${xCenter(index)},${yPercent(item.efficiency)}`);
+    const efficiencyLinePoints = data
+      .map((item, index) => (item.efficiency === null ? "" : `${xCenter(index)},${yPercent(item.efficiency)}`))
+      .filter(Boolean)
+      .join(" ");
     const expectedLines = [
       expected.work > 0 ? { key: "work", value: expected.work, color: barColor.work, label: `期望 ${formatChartHourValue(expected.work)}` } : null,
       expected.study > 0 ? { key: "study", value: expected.study, color: barColor.study, label: `期望 ${formatChartHourValue(expected.study)}` } : null,
@@ -1100,8 +1176,8 @@
 
     return `
       <section class="record-trend-card">
-        <div class="record-trend-scroll">
-        <svg class="record-trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="近7日工位时长、学习时长和工位时间利用率">
+        <div class="record-trend-scroll" data-record-chart-drag="true">
+        <svg class="record-trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="学习时间统计：工位时长、学习时长和工位时间利用率">
           <line class="chart-axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + chartHeight}" />
           <line class="chart-axis" x1="${margin.left}" y1="${margin.top + chartHeight}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" />
           <line class="chart-axis" x1="${margin.left + chartWidth}" y1="${margin.top}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" />
@@ -1131,23 +1207,8 @@
               `;
             })
             .join("")}
-          ${data
-            .map((item, index) => {
-              const center = xCenter(index);
-              return activeBars
-                .map((key, barIndex) => {
-                  const value = item[key];
-                  if (value === null) return "";
-                  const x = center - groupWidth / 2 + barIndex * (barWidth + barGap);
-                  const y = yHour(value);
-                  const barHeight = margin.top + chartHeight - y;
-                  const label = labels[key] && value > 0 ? `<text class="chart-value-label" x="${x + barWidth / 2}" y="${Math.max(margin.top + 12, y - 6)}">${formatChartHourValue(value)}</text>` : "";
-                  return `<rect class="chart-bar chart-bar-${key}" x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="4" style="fill:${barColor[key]}" />${label}`;
-                })
-                .join("");
-            })
-            .join("")}
-          ${efficiencySegments.map((points) => `<polyline class="chart-efficiency-line" points="${points}" />`).join("")}
+          ${data.map((item, index) => renderRecordChartColumn(item, index, { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, labels, barColor, studyFillColor })).join("")}
+          ${efficiencyLinePoints ? `<polyline class="chart-efficiency-line" points="${efficiencyLinePoints}" />` : ""}
           ${data
             .map((item, index) => {
               if (item.efficiency === null) return "";
@@ -1160,16 +1221,16 @@
           ${data
             .map((item, index) => {
               const show = index === 0 || index === data.length - 1 || index % labelEvery === 0;
-              return show ? `<text class="chart-x-label" x="${xCenter(index)}" y="${height - 20}">${escapeHtml(item.label)}${item.holiday ? " 休" : ""}</text>` : "";
+              return show ? `<text class="chart-x-label" x="${xCenter(index)}" y="${height - 20}">${escapeHtml(item.label)}</text>` : "";
             })
             .join("")}
         </svg>
         </div>
         <div class="record-trend-legend">
-          <span><i style="background:#4e7fa8"></i>工位时长</span>
-          <span><i style="background:${getStudyTag()?.color || "#2f6f73"}"></i>学习时长</span>
+          <span><i class="hollow" style="color:${barColor.work}"></i>工位时长</span>
+          <span><i style="background:${studyFillColor}"></i>学习填充</span>
           <span><i class="line"></i>工位时间利用率</span>
-          ${expected.work > 0 ? `<span><i class="dash" style="color:#4e7fa8"></i>期望工位</span>` : ""}
+          ${expected.work > 0 ? `<span><i class="dash" style="color:${barColor.work}"></i>期望工位</span>` : ""}
           ${expected.study > 0 ? `<span><i class="dash" style="color:${getStudyTag()?.color || "#2f6f73"}"></i>期望学习</span>` : ""}
         </div>
       </section>
@@ -1187,9 +1248,79 @@
         holiday,
         study,
         work,
-        efficiency: !holiday && work > 0 ? clamp(Math.round((study / work) * 100), 0, 100) : null,
+        efficiency: holiday ? null : work > 0 ? clamp(Math.round((study / work) * 100), 0, 100) : 0,
       };
     });
+  }
+
+  function renderRecordChartColumn(item, index, config) {
+    const { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, labels, studyFillColor } = config;
+    const center = xCenter(index);
+    const baseline = margin.top + chartHeight;
+    const workValue = item.work;
+    const studyValue = item.study;
+    const parts = [];
+    if (studyValue > 0) {
+      const hasWorkCup = workValue !== null && workValue > 0;
+      const cupValue = hasWorkCup ? workValue : studyValue;
+      const fillValue = hasWorkCup ? Math.min(studyValue, workValue) : studyValue;
+      const cupY = yHour(cupValue);
+      const fillY = yHour(fillValue);
+      const cupHeight = Math.max(2, baseline - cupY);
+      const x = center - studyWidth / 2;
+      const clipId = `chart-water-clip-${index}`;
+      const frozen = !hasWorkCup || studyValue >= workValue;
+      const labelY = frozen && hasWorkCup ? cupY : yHour(studyValue);
+      const label = labels.study ? `<text class="chart-value-label chart-study-label" x="${center + groupWidth * 0.34}" y="${Math.max(margin.top + 22, labelY - 8)}">${formatChartHourValue(studyValue)}</text>` : "";
+      parts.push(`
+        <defs>
+          <clipPath id="${clipId}">
+            <rect x="${x + 1}" y="${cupY + 1}" width="${Math.max(1, studyWidth - 2)}" height="${Math.max(1, cupHeight - 1)}" />
+          </clipPath>
+        </defs>
+        ${
+          frozen
+            ? renderChartFrozenColumn(x, cupY, studyWidth, cupHeight, clipId)
+            : `<g clip-path="url(#${clipId})">
+                <path class="chart-bar-study-fill chart-water-layer" d="${waterFillPath(x, fillY, studyWidth, baseline)}" style="fill:${studyFillColor}" />
+              </g>`
+        }
+        ${label}
+      `);
+    }
+    if (workValue !== null && workValue > 0) {
+      const y = yHour(workValue);
+      const height = Math.max(2, baseline - y);
+      const x = center - groupWidth / 2;
+      const label = labels.work ? `<text class="chart-value-label chart-work-label" x="${center - groupWidth * 0.34}" y="${Math.max(margin.top + 12, y - 8)}">${formatChartHourValue(workValue)}</text>` : "";
+      parts.push(`<rect class="chart-bar-work-outline" x="${x}" y="${y}" width="${groupWidth}" height="${height}" />${label}`);
+    }
+    return parts.join("");
+  }
+
+  function waterFillPath(x, y, width, baseline) {
+    const height = Math.max(2, baseline - y);
+    const inset = Math.min(2.4, width * 0.12, height * 0.2);
+    const centerDrop = Math.min(1.5, inset * 0.72);
+    const middleY = y + inset;
+    const right = x + width;
+    return [
+      `M ${x} ${baseline}`,
+      `L ${x} ${y}`,
+      `L ${x + inset} ${middleY}`,
+      `Q ${x + width / 2} ${middleY + centerDrop} ${right - inset} ${middleY}`,
+      `L ${right} ${y}`,
+      `L ${right} ${baseline}`,
+      "Z",
+    ].join(" ");
+  }
+
+  function renderChartFrozenColumn(x, y, width, height, clipId) {
+    return `
+      <g clip-path="url(#${clipId})">
+        <rect class="chart-bar-study-fill chart-ice-column" x="${x}" y="${y}" width="${width}" height="${height}" />
+      </g>
+    `;
   }
 
   function formatChartHourTick(value) {
@@ -1555,6 +1686,7 @@
     const date = reviewDate(scope);
     const key = scopeKey(scope, date);
     const review = weeklyReviewForKey(key);
+    const holidaySummary = weeklyHolidaySummaryText(date);
     return `
       <section class="section-band review-scope-section weekly-review-section" data-review-scope="${scope}">
         ${renderReviewNavigator(scope)}
@@ -1562,6 +1694,7 @@
           <div>
             <h2>${reviewLabel(scope)}</h2>
             <p class="hint">${scopeDisplay(scope, date)}</p>
+            ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
         </div>
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
@@ -1599,6 +1732,7 @@
     const date = reviewDate(scope);
     const key = scopeKey(scope, date);
     const review = monthlyReviewForKey(key);
+    const holidaySummary = monthlyHolidaySummaryText(date);
     return `
       <section class="section-band review-scope-section monthly-review-section" data-review-scope="${scope}">
         ${renderReviewNavigator(scope)}
@@ -1606,6 +1740,7 @@
           <div>
             <h2>${reviewLabel(scope)}</h2>
             <p class="hint">${scopeDisplay(scope, date)}</p>
+            ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
         </div>
         ${renderMonthlyStatsTable(date)}
@@ -2102,10 +2237,15 @@
     openModal(
       `${exportScopeTitle(exportScope)}导出`,
       `
-        <p class="hint">勾选内容后生成预览图，长按或右键即可保存。</p>
+        <p class="hint">勾选内容后生成渲染级预览图，可复制或保存为图片。</p>
         <div class="export-scope-grid">
           ${renderExportOptions(defaults, exportScope)}
         </div>
+        <div class="button-row export-action-row">
+          <button class="secondary-button" type="button" data-modal-action="copy-export-image">复制图片</button>
+          <button class="primary-button" type="button" data-modal-action="save-export-image">保存图片</button>
+        </div>
+        <p id="export-status" class="export-status" role="status"></p>
         <div class="export-preview-wrap">
           <img id="export-image" alt="导出预览" />
           <p id="export-empty" class="empty compact-empty hidden">请至少勾选一项内容。</p>
@@ -2113,36 +2253,89 @@
       `,
       (backdrop) => {
         let exportPreviewTicket = 0;
+        let latestExportResult = null;
+        let latestExportValues = [];
+        const status = $("#export-status", backdrop);
+        const setExportStatus = (message, tone = "") => {
+          if (!status) return;
+          status.textContent = message || "";
+          status.dataset.tone = tone;
+        };
+        const selectedExportItems = () => $$("input[name='export-item']:checked", backdrop).map((input) => input.value);
+        const showExportCanvasPreview = (canvas) => {
+          const image = $("#export-image", backdrop);
+          const empty = $("#export-empty", backdrop);
+          image.src = canvas.toDataURL("image/png");
+          image.classList.remove("hidden");
+          empty.classList.add("hidden");
+        };
         const updatePreview = async () => {
           const ticket = ++exportPreviewTicket;
-          const items = $$("input[name='export-item']:checked", backdrop).map((input) => input.value);
+          const items = selectedExportItems();
           const enabledCount = $$("input[name='export-item']:not(:disabled)", backdrop).length;
           const image = $("#export-image", backdrop);
           const empty = $("#export-empty", backdrop);
+          latestExportResult = null;
+          latestExportValues = items;
           if (!items.length) {
             image.removeAttribute("src");
             image.classList.add("hidden");
             empty.textContent = enabledCount ? "请至少勾选一项内容。" : "当前页暂无可导出内容。";
             empty.classList.remove("hidden");
+            setExportStatus("");
             return;
           }
           image.classList.add("hidden");
           empty.textContent = "正在生成预览图...";
           empty.classList.remove("hidden");
+          setExportStatus("");
           try {
-            const dataUrl = await createExportImage(items, exportScope);
+            const result = await createExportCanvas(items, exportScope);
             if (ticket !== exportPreviewTicket) return;
-            image.src = dataUrl;
-            image.classList.remove("hidden");
-            empty.classList.add("hidden");
+            latestExportResult = result;
+            latestExportValues = items;
+            showExportCanvasPreview(result.canvas);
           } catch (error) {
             console.warn(error);
             if (ticket !== exportPreviewTicket) return;
-            empty.textContent = "预览图生成失败，请稍后再试。";
+            empty.textContent = `图片生成失败：${error.message || error}`;
+            setExportStatus(error.message || "图片生成失败。", "error");
+          }
+        };
+        const exportSelectedImages = async (mode) => {
+          const items = selectedExportItems();
+          if (!items.length) {
+            setExportStatus("请至少选择一项。", "error");
+            return;
+          }
+          try {
+            setExportStatus(mode === "copy" ? "正在生成并复制图片..." : "正在生成并保存图片...");
+            const result = latestExportResult && sameExportItems(items, latestExportValues)
+              ? latestExportResult
+              : await createExportCanvas(items, exportScope);
+            latestExportResult = result;
+            latestExportValues = items;
+            showExportCanvasPreview(result.canvas);
+            if (mode === "copy") {
+              await copyCanvasImage(result.canvas);
+              setExportStatus("已复制图片。", "success");
+            } else {
+              const filename = result.items.length === 1 ? `${sanitizeFilename(result.items[0].name)}.png` : "导出长图.png";
+              await saveCanvasImage(result.canvas, filename);
+              setExportStatus("已打开保存/分享面板。", "success");
+            }
+          } catch (error) {
+            console.warn(error);
+            setExportStatus(error.message || "导出失败。", "error");
           }
         };
         backdrop.addEventListener("change", (event) => {
           if (event.target.name === "export-item") updatePreview();
+        });
+        backdrop.addEventListener("click", (event) => {
+          const action = event.target.dataset.modalAction;
+          if (action === "copy-export-image") exportSelectedImages("copy");
+          if (action === "save-export-image") exportSelectedImages("save");
         });
         updatePreview();
       },
@@ -2194,10 +2387,37 @@
         "记录",
         [
           ["record-logs", "今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`],
-          ["record-summary", "近7日汇总", recordChartRangeText()],
+          ["record-summary", "学习时间统计", recordChartRangeText()],
         ],
       ],
     ];
+  }
+
+  function exportItemName(item) {
+    const names = {
+      "record-logs": "今日时间记录",
+      "record-location": "地点时间",
+      "record-summary": "学习时间统计",
+      "execute-targets": "目标情况",
+      "execute-habits": "习惯情况",
+      "review-day": "日复盘",
+      "review-week": "周复盘",
+      "review-month": "月复盘",
+      "review-month-red": "月红灯情况",
+      "review-month-green": "月绿灯情况",
+    };
+    return names[item] || "导出图片";
+  }
+
+  function exportItemMeta(item, scope = state.activeTab) {
+    if (item === "record-logs") return `${dateKey()} ${weekdayText(dateKey())}`;
+    if (item === "record-summary") return recordChartRangeText();
+    if (item === "execute-targets") return scopeDisplay("day", dateKey());
+    if (item === "execute-habits") return habitTrailRangeText();
+    if (item === "review-day") return scopeDisplay("day", reviewDate("day"));
+    if (item === "review-week") return reviewNavigatorDisplay("week", reviewDate("week"));
+    if (item === "review-month" || item === "review-month-red" || item === "review-month-green") return scopeDisplay("month", reviewDate("month"));
+    return exportScopeTitle(scope);
   }
 
   function renderExportOptions(defaults, scope) {
@@ -2309,20 +2529,292 @@
     return Boolean(insight?.trim()) || monthWeekBuckets(date).some((bucket) => readWeeklyReviewForKey(bucket.key)[mode]?.trim());
   }
 
-  async function createExportImage(items, scope = state.activeTab) {
-    const exportNode = buildExportNode(items, scope);
+  async function createExportCanvas(items, scope = state.activeTab) {
+    const exportItems = [];
+    for (const item of items) {
+      const canvas = await createExportItemCanvas(item, scope);
+      if (canvas) exportItems.push({ name: exportItemName(item), canvas });
+    }
+    if (!exportItems.length) throw new Error("当前选择的内容没有可导出的渲染结果。");
+    return {
+      items: exportItems,
+      canvas: exportItems.length === 1 ? exportItems[0].canvas : combineExportCanvases(exportItems.map((entry) => entry.canvas)),
+    };
+  }
+
+  async function createExportItemCanvas(item, scope = state.activeTab) {
+    const sourceCanvas = currentCanvasForExportItem(item);
+    if (sourceCanvas) return makeChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceCanvas);
+    const sourceSvg = currentSvgForExportItem(item);
+    if (sourceSvg) return await makeSvgChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceSvg);
+    const exportNode = buildSingleExportNode(item, scope);
+    if (!exportNode) return null;
     const measureHost = document.createElement("div");
     measureHost.className = "review-export-measure";
+    measureHost.style.width = `${exportCanvasCssWidth()}px`;
     measureHost.appendChild(exportNode);
     document.body.appendChild(measureHost);
     try {
       if (document.fonts?.ready) await document.fonts.ready.catch(() => {});
       const width = Math.ceil(exportNode.scrollWidth);
       const height = Math.ceil(exportNode.scrollHeight);
-      return await renderNodeToPng(exportNode, width, height);
+      if (!width || !height) throw new Error(`${exportItemName(item)}图片生成失败：模块尺寸为空。`);
+      return await renderNodeToCanvas(exportNode, width, height);
     } finally {
       measureHost.remove();
     }
+  }
+
+  function buildSingleExportNode(item, scope = state.activeTab) {
+    const html = renderExportItem(item);
+    if (!html) return null;
+    const node = document.createElement("div");
+    node.className = "review-export-sheet single-export-sheet";
+    node.style.width = `${exportCanvasCssWidth()}px`;
+    node.innerHTML = `<div class="review-export-stack">${html}</div>`;
+    return node;
+  }
+
+  function exportCanvasCssWidth() {
+    const viewport = Math.floor(window.innerWidth || 430);
+    return clamp(Math.min(viewport - 24, 430), 320, 430);
+  }
+
+  function currentCanvasForExportItem(item) {
+    const selector = {
+      "record-summary": ".today-summary canvas",
+      "execute-habits": ".habit-section canvas",
+      "review-week": '[data-review-scope="week"] canvas',
+      "review-month": '[data-review-scope="month"] canvas',
+    }[item];
+    return selector ? $(selector) : null;
+  }
+
+  function currentSvgForExportItem(item) {
+    const selector = {
+      "record-summary": ".today-summary .record-trend-chart",
+    }[item];
+    const node = selector ? $(selector) : null;
+    return node instanceof SVGSVGElement ? node : null;
+  }
+
+  function makeChartExportCanvas(title, meta, sourceCanvas) {
+    if (!(sourceCanvas instanceof HTMLCanvasElement)) return null;
+    const scale = exportScale();
+    const cssWidth = exportCanvasCssWidth();
+    const padding = 14;
+    const titleHeight = 48;
+    const chartWidth = cssWidth - padding * 2;
+    const ratio = sourceCanvas.width && sourceCanvas.height ? sourceCanvas.height / sourceCanvas.width : 0.62;
+    const chartHeight = Math.max(180, Math.round(chartWidth * ratio));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(cssWidth * scale);
+    canvas.height = Math.ceil((padding * 2 + titleHeight + chartHeight) * scale);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法创建图表导出画布。");
+    context.scale(scale, scale);
+    drawExportBackground(context, cssWidth, canvas.height / scale);
+    context.fillStyle = "#ffffff";
+    roundRectPath(context, padding, padding, chartWidth, titleHeight + chartHeight, 8);
+    context.fill();
+    context.fillStyle = "#20231f";
+    context.font = "800 18px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText(title, padding + 12, padding + 24);
+    if (meta) {
+      context.fillStyle = "#687068";
+      context.font = "700 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+      context.fillText(meta, padding + 12, padding + 42);
+    }
+    context.drawImage(sourceCanvas, padding, padding + titleHeight, chartWidth, chartHeight);
+    return canvas;
+  }
+
+  async function makeSvgChartExportCanvas(title, meta, sourceSvg) {
+    const scale = exportScale();
+    const cssWidth = exportCanvasCssWidth();
+    const padding = 14;
+    const titleHeight = 48;
+    const chartWidth = cssWidth - padding * 2;
+    const svgSize = svgElementSize(sourceSvg);
+    const chartHeight = Math.max(180, Math.round(chartWidth * (svgSize.height / svgSize.width)));
+    const legendItems = chartLegendItemsForExport(sourceSvg);
+    const legendRows = Math.ceil(legendItems.length / 2);
+    const legendHeight = legendItems.length ? legendRows * 20 + 10 : 0;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(cssWidth * scale);
+    canvas.height = Math.ceil((padding * 2 + titleHeight + chartHeight + legendHeight) * scale);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法创建图表导出画布。");
+    context.scale(scale, scale);
+    drawExportBackground(context, cssWidth, canvas.height / scale);
+    context.fillStyle = "#ffffff";
+    roundRectPath(context, padding, padding, chartWidth, titleHeight + chartHeight + legendHeight, 8);
+    context.fill();
+    context.fillStyle = "#20231f";
+    context.font = "800 18px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText(title, padding + 12, padding + 24);
+    if (meta) {
+      context.fillStyle = "#687068";
+      context.font = "700 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+      context.fillText(meta, padding + 12, padding + 42);
+    }
+    try {
+      const image = await svgElementToImage(sourceSvg);
+      context.drawImage(image, padding, padding + titleHeight, chartWidth, chartHeight);
+      drawChartLegendForExport(context, legendItems, padding + 12, padding + titleHeight + chartHeight + 4, chartWidth - 24);
+      return canvas;
+    } catch (error) {
+      console.warn("SVG chart export failed.", error);
+      throw new Error(`学习时间统计导出失败：${error.message || "浏览器限制 SVG 渲染"}`);
+    }
+  }
+
+  function svgElementSize(svg) {
+    const viewBox = svg.viewBox?.baseVal;
+    if (viewBox?.width && viewBox?.height) return { width: viewBox.width, height: viewBox.height };
+    const rect = svg.getBoundingClientRect();
+    return { width: rect.width || 520, height: rect.height || 310 };
+  }
+
+  async function svgElementToImage(sourceSvg) {
+    const size = svgElementSize(sourceSvg);
+    const clone = sourceSvg.cloneNode(true);
+    clone.classList.remove("water-shake");
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", String(size.width));
+    clone.setAttribute("height", String(size.height));
+    if (!clone.getAttribute("viewBox")) clone.setAttribute("viewBox", `0 0 ${size.width} ${size.height}`);
+    const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+    style.textContent = svgChartExportCss();
+    clone.insertBefore(style, clone.firstChild);
+    const serialized = new XMLSerializer().serializeToString(clone);
+    const url = URL.createObjectURL(new Blob([serialized], { type: "image/svg+xml;charset=utf-8" }));
+    try {
+      return await loadImage(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function svgChartExportCss() {
+    return `
+      .chart-axis{stroke:#9aa79b;stroke-width:1}
+      .chart-grid{stroke:rgba(154,167,155,.28);stroke-width:1}
+      .chart-axis-title,.chart-y-label,.chart-x-label,.chart-value-label,.chart-efficiency-label,.chart-expected-label{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif;font-size:13px;font-weight:780}
+      .chart-axis-title,.chart-y-label,.chart-x-label,.chart-expected-label{fill:#687068}
+      .chart-y-label.left{text-anchor:end}
+      .chart-y-label.right{text-anchor:start}
+      .chart-x-label{text-anchor:middle}
+      .chart-value-label{fill:#20231f;text-anchor:middle}
+      .chart-bar-work-outline{fill:rgba(57,191,242,.07);stroke:#39bff2;stroke-width:2;vector-effect:non-scaling-stroke}
+      .chart-water-layer{opacity:.72;filter:drop-shadow(0 -1px 0 rgba(255,255,255,.34))}
+      .chart-ice-column{fill:rgba(198,239,253,.86);stroke:rgba(59,177,222,.72);stroke-width:1;vector-effect:non-scaling-stroke;filter:drop-shadow(0 -1px 0 rgba(255,255,255,.55))}
+      .chart-expected-line{stroke-width:2;stroke-dasharray:7 6;stroke-linecap:round;opacity:.86}
+      .chart-expected-label{text-anchor:end;paint-order:stroke;stroke:#fbfcfa;stroke-width:4px;stroke-linejoin:round}
+      .chart-efficiency-line{fill:none;stroke:#3fa66b;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+      .chart-efficiency-dot{fill:#3fa66b;stroke:#fff;stroke-width:1.5}
+      .chart-efficiency-label{fill:#2f8f5b;text-anchor:middle}
+    `;
+  }
+
+  function chartLegendItemsForExport(sourceSvg) {
+    const card = sourceSvg.closest(".record-trend-card");
+    if (!card) return [];
+    return $$(".record-trend-legend span", card).map((item) => {
+      const swatch = item.querySelector("i");
+      const computed = swatch ? getComputedStyle(swatch) : null;
+      const background = computed?.backgroundColor || "";
+      const color = background && background !== "rgba(0, 0, 0, 0)" ? background : computed?.color || "#39bff2";
+      return {
+        label: item.textContent.trim(),
+        color,
+        hollow: swatch?.classList.contains("hollow"),
+        dash: swatch?.classList.contains("dash"),
+        line: swatch?.classList.contains("line"),
+      };
+    });
+  }
+
+  function drawChartLegendForExport(context, items, x, y, width) {
+    if (!items.length) return;
+    const columns = width >= 330 ? 2 : 1;
+    const columnWidth = width / columns;
+    context.font = "700 11px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.textBaseline = "middle";
+    items.forEach((item, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const itemX = x + column * columnWidth;
+      const itemY = y + row * 20 + 10;
+      context.strokeStyle = item.color;
+      context.fillStyle = item.color;
+      context.lineWidth = 2;
+      if (item.dash) {
+        context.setLineDash([5, 4]);
+        context.beginPath();
+        context.moveTo(itemX, itemY);
+        context.lineTo(itemX + 16, itemY);
+        context.stroke();
+        context.setLineDash([]);
+      } else if (item.line) {
+        context.fillRect(itemX, itemY - 1.5, 16, 3);
+      } else if (item.hollow) {
+        context.strokeRect(itemX, itemY - 5, 10, 10);
+      } else {
+        context.fillRect(itemX, itemY - 5, 10, 10);
+      }
+      context.fillStyle = "#687068";
+      context.fillText(item.label, itemX + 22, itemY);
+    });
+  }
+
+  function combineExportCanvases(canvases) {
+    const visibleCanvases = canvases.filter(Boolean);
+    if (!visibleCanvases.length) throw new Error("没有可合成的导出图片。");
+    if (visibleCanvases.length === 1) return visibleCanvases[0];
+    const gap = Math.round(14 * exportScale());
+    const padding = Math.round(14 * exportScale());
+    const width = Math.max(...visibleCanvases.map((canvas) => canvas.width)) + padding * 2;
+    const height = visibleCanvases.reduce((sum, canvas) => sum + canvas.height, padding * 2 + gap * (visibleCanvases.length - 1));
+    const output = document.createElement("canvas");
+    output.width = width;
+    output.height = height;
+    const context = output.getContext("2d");
+    if (!context) throw new Error("无法创建长图画布。");
+    context.fillStyle = "#f6f7f4";
+    context.fillRect(0, 0, width, height);
+    let y = padding;
+    visibleCanvases.forEach((canvas) => {
+      const x = Math.round((width - canvas.width) / 2);
+      context.drawImage(canvas, x, y);
+      y += canvas.height + gap;
+    });
+    return output;
+  }
+
+  function exportScale() {
+    return Math.min(2, Math.max(1.5, window.devicePixelRatio || 1.5));
+  }
+
+  function drawExportBackground(context, width, height) {
+    context.fillStyle = "#f6f7f4";
+    context.fillRect(0, 0, width, height);
+    const gradient = context.createLinearGradient(0, 0, 0, Math.min(280, height));
+    gradient.addColorStop(0, "rgba(47, 111, 115, 0.08)");
+    gradient.addColorStop(1, "rgba(47, 111, 115, 0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, Math.min(280, height));
+  }
+
+  function roundRectPath(context, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.arcTo(x + width, y, x + width, y + height, r);
+    context.arcTo(x + width, y + height, x, y + height, r);
+    context.arcTo(x, y + height, x, y, r);
+    context.arcTo(x, y, x + width, y, r);
+    context.closePath();
   }
 
   function buildExportNode(items, scope = state.activeTab) {
@@ -2376,7 +2868,7 @@
     fragment.className = `export-page-fragment export-${item}`;
     const appendClone = (node) => {
       if (!node) return;
-      fragment.appendChild(node.cloneNode(true));
+      fragment.appendChild(cloneNodeWithRenderedCanvases(node));
     };
 
     if (item === "record-logs") {
@@ -2403,6 +2895,24 @@
     if (!fragment.children.length) return null;
     cleanExportClone(fragment, item);
     return fragment.children.length ? fragment : null;
+  }
+
+  function cloneNodeWithRenderedCanvases(node) {
+    const clone = node.cloneNode(true);
+    const sourceCanvases = $$("canvas", node);
+    const cloneCanvases = $$("canvas", clone);
+    cloneCanvases.forEach((canvas, index) => {
+      const source = sourceCanvases[index];
+      if (!(source instanceof HTMLCanvasElement)) return;
+      const image = document.createElement("img");
+      image.src = source.toDataURL("image/png");
+      image.width = source.clientWidth || source.width;
+      image.height = source.clientHeight || source.height;
+      image.alt = canvas.getAttribute("aria-label") || "";
+      image.className = canvas.className;
+      canvas.replaceWith(image);
+    });
+    return clone;
   }
 
   function cleanExportClone(fragment, item) {
@@ -2676,7 +3186,7 @@
     `;
   }
 
-  async function renderNodeToPng(node, width, height) {
+  async function renderNodeToCanvas(node, width, height) {
     const cssText = collectExportCss();
     const serializedNode = new XMLSerializer().serializeToString(node);
     const html = `
@@ -2693,7 +3203,7 @@
     const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
     try {
       const image = await loadImage(url);
-      const scale = Math.min(2, window.devicePixelRatio || 1.5);
+      const scale = exportScale();
       const canvas = document.createElement("canvas");
       canvas.width = Math.ceil(width * scale);
       canvas.height = Math.ceil(height * scale);
@@ -2703,15 +3213,70 @@
       context.imageSmoothingQuality = "high";
       context.scale(scale, scale);
       context.drawImage(image, 0, 0, width, height);
-      const dataUrl = canvas.toDataURL("image/png");
-      if (!dataUrl.startsWith("data:image/png")) throw new Error("导出 PNG 生成失败。");
-      return dataUrl;
+      return canvas;
     } catch (error) {
       console.warn("PNG export failed.", error);
       throw error;
     } finally {
       URL.revokeObjectURL(url);
     }
+  }
+
+  async function renderNodeToPng(node, width, height) {
+    const canvas = await renderNodeToCanvas(node, width, height);
+    const dataUrl = canvas.toDataURL("image/png");
+    if (!dataUrl.startsWith("data:image/png")) throw new Error("导出 PNG 生成失败。");
+    return dataUrl;
+  }
+
+  function canvasToBlob(canvas) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("图片生成失败：浏览器没有返回 PNG 数据。"));
+      }, "image/png");
+    });
+  }
+
+  async function copyCanvasImage(canvas) {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+      throw new Error("当前浏览器不支持复制图片，请使用保存图片或长按预览图保存。");
+    }
+    const blob = await canvasToBlob(canvas);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+  }
+
+  async function saveCanvasImage(canvas, filename = "导出图片.png") {
+    const blob = await canvasToBlob(canvas);
+    const file = new File([blob], filename, { type: "image/png" });
+    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+      try {
+        await navigator.share({ files: [file], title: filename });
+        return;
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error("已取消保存/分享。");
+        console.warn("navigator.share failed, fallback to download.", error);
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  function sameExportItems(a = [], b = []) {
+    return a.length === b.length && a.every((item, index) => item === b[index]);
+  }
+
+  function sanitizeFilename(value) {
+    return String(value || "导出图片").replace(/[\\/:*?"<>|]+/g, "-").slice(0, 48) || "导出图片";
   }
 
   function collectExportCss() {
@@ -3338,7 +3903,7 @@
           const type = $("[data-location-time-field='type']", backdrop).value;
           const start = $("[data-location-time-field='start']", backdrop).value;
           const end = $("[data-location-time-field='end']", backdrop).value;
-          if (!type || !start || (end && start === end)) {
+          if (!type || !start || (end && start === end && !isFullDayLocationRecord({ start, end }))) {
             alert("请选择地点，并填写有效的开始时间。");
             return;
           }
@@ -3408,21 +3973,28 @@
 
   function defaultLocationTimeDraft() {
     const range = recordAxisRange();
-    const entries = normalizeLocationRecords(state.locationLogs?.[dateKey()] || {}).records
-      .filter((entry) => entry.start)
-      .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
-    const lastEntry = [...entries].reverse().find((entry) => entry.end);
     const rangeStart = minutesToTime(range.start);
-    let start = lastEntry?.end || rangeStart;
-    if (timeToMinutes(start) >= range.end) {
-      start = rangeStart;
-    }
+    let start = nextLocationStartTime() || rangeStart;
     return {
       id: "",
       type: defaultLocationId(),
       start,
       end: "",
     };
+  }
+
+  function nextLocationStartTime(date = dateKey()) {
+    const entries = locationEntriesForDate(date).filter((entry) => entry.start && entry.end);
+    if (!entries.length) return "";
+    const lastEntry = [...entries].sort((a, b) => absoluteEndMinute(a) - absoluteEndMinute(b)).at(-1);
+    return lastEntry?.end || "";
+  }
+
+  function absoluteEndMinute(entry) {
+    const start = timeToMinutes(entry.start);
+    const end = timeToMinutes(entry.end);
+    if (isFullDayLocationRecord(entry)) return 1440;
+    return end <= start ? end + 1440 : end;
   }
 
   function currentClockMinutes() {
@@ -4077,6 +4649,32 @@
     window.setTimeout(() => sanitizeBulletTextarea(event.target, { removeEmptyLines: false, dispatch: true }), 0);
   });
 
+  let waterMotionTimer = null;
+  let waterMotionFrame = null;
+  function triggerChartWaterMotion() {
+    const charts = $$(".record-trend-chart");
+    if (!charts.length) return;
+    if (waterMotionFrame) window.cancelAnimationFrame(waterMotionFrame);
+    charts.forEach((chart) => chart.classList.remove("water-shake"));
+    charts[0].getBoundingClientRect();
+    waterMotionFrame = window.requestAnimationFrame(() => {
+      charts.forEach((chart) => chart.classList.add("water-shake"));
+      window.clearTimeout(waterMotionTimer);
+      waterMotionTimer = window.setTimeout(() => {
+        charts.forEach((chart) => chart.classList.remove("water-shake"));
+        waterMotionFrame = null;
+      }, 1350);
+    });
+  }
+
+  document.addEventListener(
+    "scroll",
+    () => {
+      triggerChartWaterMotion();
+    },
+    { passive: true },
+  );
+
   document.addEventListener(
     "focus",
     (event) => {
@@ -4159,7 +4757,7 @@
     const locationId = locationNode.dataset.locationId;
     const draft = ui.locationDrafts.get(locationId);
     if (!draft) return;
-    if (!draft.type || !draft.start || (draft.end && draft.start === draft.end)) {
+    if (!draft.type || !draft.start || (draft.end && draft.start === draft.end && !isFullDayLocationRecord(draft))) {
       alert("请先选择地点，并填写有效的开始时间。");
       return;
     }
@@ -4306,6 +4904,57 @@
   function toggleRecordChartSeries(series, checked) {
     if (!["work", "study", "efficiency"].includes(series)) return;
     ui.recordChartSeries[series] = Boolean(checked);
+    render();
+  }
+
+  function bindRecordChartDrag(root = document) {
+    if (!root) return;
+    $$("[data-record-chart-drag]", root).forEach((wrap) => {
+      if (wrap.dataset.dragBound === "true") return;
+      wrap.dataset.dragBound = "true";
+      bindChartDrag(wrap, shiftRecordChartWindow);
+    });
+  }
+
+  function bindChartDrag(wrap, onShift) {
+    let startX = 0;
+    let pointerId = null;
+
+    wrap.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      startX = event.clientX;
+      pointerId = event.pointerId;
+      triggerChartWaterMotion();
+      wrap.setPointerCapture?.(pointerId);
+    });
+
+    wrap.addEventListener("pointerup", (event) => {
+      if (pointerId !== event.pointerId) return;
+
+      const deltaX = event.clientX - startX;
+      pointerId = null;
+
+      if (Math.abs(deltaX) < 36) return;
+
+      const days = Math.max(1, Math.min(7, Math.round(Math.abs(deltaX) / 70)));
+      const direction = deltaX > 0 ? days : -days;
+
+      onShift(direction);
+    });
+
+    wrap.addEventListener("pointercancel", () => {
+      pointerId = null;
+    });
+  }
+
+  function shiftRecordChartWindow(direction) {
+    const previous = ui.recordChartWindowOffset || 0;
+    const next = Math.max(0, previous + (Number(direction) || 0));
+    if (next === previous) {
+      triggerChartWaterMotion();
+      return;
+    }
+    ui.recordChartWindowOffset = next;
     render();
   }
 
@@ -5244,15 +5893,22 @@
   }
 
   function weeklyHolidaySummaryText(date) {
-    const dates = datesInScope("week", date);
+    return holidaySummaryTextForDates(datesInScope("week", date), "本周", 4);
+  }
+
+  function monthlyHolidaySummaryText(date) {
+    return holidaySummaryTextForDates(datesInScope("month", date), "本月", 15);
+  }
+
+  function holidaySummaryTextForDates(dates, label, reverseThreshold) {
     const holidayDates = dates.filter((itemDate) => isHolidayDate(itemDate));
     if (!holidayDates.length) return "";
-    if (holidayDates.length > 4) {
+    if (holidayDates.length > reverseThreshold) {
       const workingDates = dates.filter((itemDate) => !isHolidayDate(itemDate));
-      if (!workingDates.length) return "本周 7 天都是假期。";
-      return `本周除${workingDates.map(shortDateWeekdayText).join("、")}外都是假期。`;
+      if (!workingDates.length) return `${label}都是假期。`;
+      return `${label}除${formatHolidayDateGroups(workingDates)}外都是假期。`;
     }
-    return `本周${holidayDates.length}天假期：${formatHolidayDateGroups(holidayDates)}。`;
+    return `${label}${holidayDates.length}天假期：${formatHolidayDateGroups(holidayDates)}。`;
   }
 
   function formatHolidayDateGroups(dates) {
@@ -5487,6 +6143,17 @@
     return isoFromDate(parsed) === text ? text : "";
   }
 
+  function parseDateKey(key) {
+    const normalized = normalizeDateKey(key) || dateKey();
+    return new Date(`${normalized}T00:00:00`);
+  }
+
+  function addDays(date, days) {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
   function timeToMinutes(value) {
     const [hours, minutes] = String(value || "00:00").split(":").map(Number);
     return clamp((hours || 0) * 60 + (minutes || 0), 0, 1439);
@@ -5591,11 +6258,7 @@
   }
 
   function recordAxisRange() {
-    const segments = state.settings.segments || defaults.settings.segments;
-    const start = timeToMinutes(segments[0]?.start || "00:00");
-    let end = timeToMinutes(segments[segments.length - 1]?.end || "23:59");
-    if (end <= start) end += 1440;
-    return { start, end };
+    return { start: 0, end: 1440 };
   }
 
   function locationSlicesForRange(start, end, date = dateKey()) {
@@ -5633,7 +6296,7 @@
         previous.end = slice.end;
         previous.ids = Array.from(new Set([...(previous.ids || []), ...(slice.ids || [])]));
         previous.id ||= slice.id;
-        previous.auto = Boolean(previous.auto && slice.auto);
+        previous.auto = Boolean(previous.auto || slice.auto);
         return;
       }
       merged.push({ ...slice, ids: [...(slice.ids || [])] });
@@ -5790,7 +6453,7 @@
     daily.records = daily.records.filter((row) => !ids.includes(row.id));
     const remap = new Map();
     if (!entry.type) removeLocationDescriptions(draft, date, ids);
-    if (entry.type && entry.start && (!entry.end || entry.start !== entry.end)) {
+    if (entry.type && entry.start && (!entry.end || entry.start !== entry.end || isFullDayLocationRecord(entry))) {
       daily.records.push({ id: entry.id, type: entry.type, start: entry.start || "", end: entry.end || "" });
       ids.filter((id) => id !== entry.id).forEach((id) => remap.set(id, entry.id));
     }
@@ -5802,7 +6465,7 @@
 
   function mergeAdjacentLocationRecords(daily) {
     daily.records = (daily.records || [])
-      .filter((row) => row.type && row.start && (!row.end || row.start !== row.end))
+      .filter((row) => row.type && row.start && (!row.end || row.start !== row.end || isFullDayLocationRecord(row)))
       .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
     const remap = new Map();
     const merged = [];
@@ -5858,13 +6521,22 @@
   function splitLocationRange(type, startValue, endValue, id = "", source = {}) {
     const start = timeToMinutes(startValue);
     const end = timeToMinutes(endValue);
-    if (start === end) return [];
+    if (start === end) {
+      if (isFullDayLocationRecord({ start: startValue, end: endValue })) {
+        return [{ id, type, source: source.source || "", synced: Boolean(source.synced), start: 0, end: 1440 }];
+      }
+      return [];
+    }
     const base = { id, type, source: source.source || "", synced: Boolean(source.synced) };
     if (end > start) return [{ ...base, start, end }];
     return [
       { ...base, start, end: 1440 },
       { ...base, start: 0, end },
     ];
+  }
+
+  function isFullDayLocationRecord(entry = {}) {
+    return String(entry.start || "") === "00:00" && String(entry.end || "") === "00:00";
   }
 
   function locationIntervalAt(minute, date = dateKey(), cachedIntervals = null) {

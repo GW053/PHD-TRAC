@@ -6,8 +6,8 @@
   const SUPABASE_TABLE = "phd_trac_records";
   const SLEEP_SOURCE_TABLE = "daily_record_sync";
   const SLEEP_STAT_KEY = "__sleep";
-  const APP_VERSION = "v1.6";
-  const VERSION_UPDATED_AT = "2026-07-01";
+  const APP_VERSION = "v1.7";
+  const VERSION_UPDATED_AT = "2026-07-07";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
   const defaultLocationTypes = [
     { id: "outdoor", name: "户外", color: "#d8b74e" },
@@ -1201,21 +1201,17 @@
           ${expectedLines
             .map((line) => {
               const y = yHour(line.value);
-              return `
-                <line class="chart-expected-line" x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" style="stroke:${line.color}" />
-                <text class="chart-expected-label" x="${margin.left + chartWidth - 4}" y="${Math.max(margin.top + 14, y - 7)}" style="fill:${line.color}">${escapeHtml(line.label)}</text>
-              `;
+              return `<line class="chart-expected-line" x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" style="stroke:${line.color}" />`;
             })
             .join("")}
-          ${data.map((item, index) => renderRecordChartColumn(item, index, { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, labels, barColor, studyFillColor })).join("")}
+          ${data.map((item, index) => renderRecordChartColumnShapes(item, index, { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, studyFillColor })).join("")}
           ${efficiencyLinePoints ? `<polyline class="chart-efficiency-line" points="${efficiencyLinePoints}" />` : ""}
           ${data
             .map((item, index) => {
               if (item.efficiency === null) return "";
               const cx = xCenter(index);
               const cy = yPercent(item.efficiency);
-              const label = labels.efficiency ? `<text class="chart-efficiency-label" x="${cx}" y="${Math.max(margin.top + 12, cy - 9)}">${item.efficiency}%</text>` : "";
-              return `<circle class="chart-efficiency-dot" cx="${cx}" cy="${cy}" r="4.2" />${label}`;
+              return `<circle class="chart-efficiency-dot" cx="${cx}" cy="${cy}" r="4.2" />`;
             })
             .join("")}
           ${data
@@ -1224,6 +1220,23 @@
               return show ? `<text class="chart-x-label" x="${xCenter(index)}" y="${height - 20}">${escapeHtml(item.label)}</text>` : "";
             })
             .join("")}
+          <g class="chart-value-layer">
+            ${expectedLines
+              .map((line) => {
+                const y = yHour(line.value);
+                return `<text class="chart-expected-label" x="${margin.left + chartWidth - 4}" y="${Math.max(margin.top + 14, y - 7)}" style="fill:${line.color}">${escapeHtml(line.label)}</text>`;
+              })
+              .join("")}
+            ${data.map((item, index) => renderRecordChartColumnLabels(item, index, { margin, groupWidth, studyWidth, yHour, xCenter, labels })).join("")}
+            ${data
+              .map((item, index) => {
+                if (item.efficiency === null || !labels.efficiency) return "";
+                const cx = xCenter(index);
+                const cy = yPercent(item.efficiency);
+                return `<text class="chart-efficiency-label" x="${cx + 8}" y="${Math.max(margin.top + 12, cy + 4)}">${item.efficiency}%</text>`;
+              })
+              .join("")}
+          </g>
         </svg>
         </div>
         <div class="record-trend-legend">
@@ -1253,10 +1266,10 @@
     });
   }
 
-  function renderRecordChartColumn(item, index, config) {
-    const { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, labels, studyFillColor } = config;
+  function renderRecordChartColumnShapes(item, index, config) {
+    const { groupWidth, studyWidth, yHour, xCenter, studyFillColor } = config;
     const center = xCenter(index);
-    const baseline = margin.top + chartHeight;
+    const baseline = config.margin.top + config.chartHeight;
     const workValue = item.work;
     const studyValue = item.study;
     const parts = [];
@@ -1270,8 +1283,6 @@
       const x = center - studyWidth / 2;
       const clipId = `chart-water-clip-${index}`;
       const frozen = !hasWorkCup || studyValue >= workValue;
-      const labelY = frozen && hasWorkCup ? cupY : yHour(studyValue);
-      const label = labels.study ? `<text class="chart-value-label chart-study-label" x="${center + groupWidth * 0.34}" y="${Math.max(margin.top + 22, labelY - 8)}">${formatChartHourValue(studyValue)}</text>` : "";
       parts.push(`
         <defs>
           <clipPath id="${clipId}">
@@ -1285,15 +1296,33 @@
                 <path class="chart-bar-study-fill chart-water-layer" d="${waterFillPath(x, fillY, studyWidth, baseline)}" style="fill:${studyFillColor}" />
               </g>`
         }
-        ${label}
       `);
     }
     if (workValue !== null && workValue > 0) {
       const y = yHour(workValue);
       const height = Math.max(2, baseline - y);
       const x = center - groupWidth / 2;
-      const label = labels.work ? `<text class="chart-value-label chart-work-label" x="${center - groupWidth * 0.34}" y="${Math.max(margin.top + 12, y - 8)}">${formatChartHourValue(workValue)}</text>` : "";
-      parts.push(`<rect class="chart-bar-work-outline" x="${x}" y="${y}" width="${groupWidth}" height="${height}" />${label}`);
+      parts.push(`<rect class="chart-bar-work-outline" x="${x}" y="${y}" width="${groupWidth}" height="${height}" />`);
+    }
+    return parts.join("");
+  }
+
+  function renderRecordChartColumnLabels(item, index, config) {
+    const { margin, groupWidth, studyWidth, yHour, xCenter, labels } = config;
+    const center = xCenter(index);
+    const workValue = item.work;
+    const studyValue = item.study;
+    const parts = [];
+    if (studyValue > 0 && labels.study) {
+      const hasWorkCup = workValue !== null && workValue > 0;
+      const cupValue = hasWorkCup ? workValue : studyValue;
+      const x = center - studyWidth / 2;
+      const labelY = hasWorkCup && studyValue >= workValue ? yHour(cupValue) : yHour(studyValue);
+      parts.push(`<text class="chart-value-label chart-study-label" x="${x - 4}" y="${Math.max(margin.top + 12, labelY + 4)}">${formatChartHourValue(studyValue)}</text>`);
+    }
+    if (workValue !== null && workValue > 0 && labels.work) {
+      const y = yHour(workValue);
+      parts.push(`<text class="chart-value-label chart-work-label" x="${center}" y="${Math.max(margin.top + 12, y - 6)}">${formatChartHourValue(workValue)}</text>`);
     }
     return parts.join("");
   }
@@ -2705,15 +2734,18 @@
       .chart-y-label.left{text-anchor:end}
       .chart-y-label.right{text-anchor:start}
       .chart-x-label{text-anchor:middle}
-      .chart-value-label{fill:#20231f;text-anchor:middle}
+      .chart-value-layer{pointer-events:none}
+      .chart-value-label{fill:#20231f;text-anchor:middle;paint-order:stroke;stroke:#fbfcfa;stroke-width:3px;stroke-linejoin:round}
+      .chart-study-label{text-anchor:end}
+      .chart-work-label{text-anchor:middle}
       .chart-bar-work-outline{fill:rgba(57,191,242,.07);stroke:#39bff2;stroke-width:2;vector-effect:non-scaling-stroke}
       .chart-water-layer{opacity:.72;filter:drop-shadow(0 -1px 0 rgba(255,255,255,.34))}
       .chart-ice-column{fill:rgba(198,239,253,.86);stroke:rgba(59,177,222,.72);stroke-width:1;vector-effect:non-scaling-stroke;filter:drop-shadow(0 -1px 0 rgba(255,255,255,.55))}
       .chart-expected-line{stroke-width:2;stroke-dasharray:7 6;stroke-linecap:round;opacity:.86}
-      .chart-expected-label{text-anchor:end;paint-order:stroke;stroke:#fbfcfa;stroke-width:4px;stroke-linejoin:round}
+      .chart-expected-label{text-anchor:end;paint-order:stroke;stroke:#fbfcfa;stroke-width:3px;stroke-linejoin:round}
       .chart-efficiency-line{fill:none;stroke:#3fa66b;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
       .chart-efficiency-dot{fill:#3fa66b;stroke:#fff;stroke-width:1.5}
-      .chart-efficiency-label{fill:#2f8f5b;text-anchor:middle}
+      .chart-efficiency-label{fill:#2f8f5b;text-anchor:start;paint-order:stroke;stroke:#fbfcfa;stroke-width:3px;stroke-linejoin:round}
     `;
   }
 
@@ -3399,6 +3431,19 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.7": {
+        updatedAt: "2026-07-07",
+        items: [
+          "记录页时间逻辑改为左侧全天地点时间轴，支持空心未计入时段、添加地点时间、默认地点和地点颜色维护。",
+          "地点记录框简化为空状态只显示地点名称和操作入口，支持地点描述、小圆点文本、事项记录和连续同地点时段合并。",
+          "新增假期时间与期望学习/工位时长设置；假期不计算工位时长利用率，周复盘和月复盘会汇总显示假期信息。",
+          "学习时间统计替代近七日汇总，图表支持左右滑动切换 7 日时间窗口，数值标签置顶并加背景描边，导出时同步使用当前窗口和当前勾选显示状态。",
+          "学习时间统计图改为水杯样式：工位时长为空心水蓝柱，学习时长为水色填充，滚动、刷新和滑动图表会触发杯内水面晃动。",
+          "学习填满工位或只有学习无工位时，学习柱显示为固定冰块状态；工位时间利用率改为绿色折线，非假期无工位按 0 连线、假期跳过。",
+          "导出图片重做为渲染级长图导出，提供预览、复制图片和保存图片；学习时间统计使用当前已渲染 SVG 直绘，避免纯文字导出。",
+          "优化移动端统计图、期望时长、假期时间和记录页标题布局，减少拥挤与重复标题。",
+        ],
+      },
       "v1.6": {
         updatedAt: "2026-07-01",
         items: [

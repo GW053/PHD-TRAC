@@ -982,10 +982,10 @@ textarea:focus {
   align-items: center;
   gap: 5px;
   min-height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: #fff;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
   font-size: 12px;
   font-weight: 760;
@@ -2558,14 +2558,31 @@ button.review-star {
   filter: drop-shadow(0 -1px 0 rgba(255, 255, 255, 0.55));
 }
 
+.chart-value-layer {
+  pointer-events: none;
+}
+
 .chart-value-label,
 .chart-efficiency-label {
   fill: var(--ink);
+  paint-order: stroke;
+  stroke: #fbfcfa;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  text-anchor: middle;
+}
+
+.chart-study-label {
+  text-anchor: end;
+}
+
+.chart-work-label {
   text-anchor: middle;
 }
 
 .chart-efficiency-label {
   fill: #2f8f5b;
+  text-anchor: start;
 }
 
 .chart-expected-line {
@@ -2579,7 +2596,7 @@ button.review-star {
   text-anchor: end;
   paint-order: stroke;
   stroke: #fbfcfa;
-  stroke-width: 4px;
+  stroke-width: 3px;
   stroke-linejoin: round;
 }
 

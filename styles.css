@@ -992,6 +992,17 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.location-assign-select {
+  max-width: 116px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfa;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+}
+
 .today-summary .compact-title {
   align-items: flex-start;
 }
@@ -2938,7 +2949,8 @@ button.review-star {
 .review-export-sheet .toggle-button,
 .review-export-sheet .date-arrow,
 .review-export-sheet .date-calendar-button,
-.review-export-sheet .axis-add-time {
+.review-export-sheet .axis-add-time,
+.review-export-sheet .location-assign-select {
   display: none !important;
 }
 

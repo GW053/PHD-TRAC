@@ -698,6 +698,7 @@
             ${timeText ? `<span class="segment-time">${timeText}</span>` : ""}
           </div>
           <div class="button-row compact-row-actions">
+            ${block.legacy && hasEntries ? renderLocationAssignmentSelect(ids) : ""}
             ${ui.recordEditing && !block.legacy && !block.auto && !hasAutoId ? `<button class="ghost-button compact-action" type="button" data-action="edit-location-time">编辑</button>` : ""}
             <button class="icon-button description-toggle location-description-toggle ${descriptionOpen ? "active" : ""}" type="button" data-action="toggle-location-description" aria-label="地点描述">☰</button>
             <button class="icon-button" type="button" data-action="add-log" data-segment-id="${escapeAttr(block.id)}" aria-label="新增记录">+</button>
@@ -710,6 +711,17 @@
             : ""
         }
       </section>
+    `;
+  }
+
+  function renderLocationAssignmentSelect(sourceIds = []) {
+    const options = locationAssignmentOptions();
+    if (!options.length) return "";
+    return `
+      <select class="location-assign-select" data-action="assign-location-block" data-source-location-ids="${escapeAttr(sourceIds.join(","))}" aria-label="分配地点">
+        <option value="">分配地点</option>
+        ${options.map((option) => `<option value="${escapeAttr(option.id)}">${escapeHtml(option.label)}</option>`).join("")}
+      </select>
     `;
   }
 
@@ -1051,6 +1063,7 @@
     const dates = recentRecordChartDates();
     return `
       <section class="summary-scope-card active-summary-scope">
+        ${renderLocationBreakdownCard(locationBreakdownForDates(dates), "地点时间占比", "所选范围还没有地点时间。")}
         ${renderRecordTrendChart(dates)}
         <div class="stat-list habit-rate-row">
           <div class="stat-row">
@@ -1727,6 +1740,7 @@
           </div>
         </div>
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
+        ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("week", date)), "地点时间占比", "本周还没有地点时间。")}
         ${renderStudyBreakdownCard(weeklyStudyBreakdown(date), "学习标签占比", "本周还没有学习记录。")}
         ${renderWeeklyKeyEvents(date)}
         ${renderWeeklyReviewEditor(review, key)}
@@ -1773,6 +1787,7 @@
           </div>
         </div>
         ${renderMonthlyStatsTable(date)}
+        ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("month", date)), "地点时间占比", "本月还没有地点时间。")}
         ${renderStudyBreakdownCard(monthlyStudyBreakdown(date), "学习标签占比（月）", "本月还没有学习记录。")}
         ${renderMonthlyReviewTabs()}
         ${renderMonthlyReviewPanel(review, key, date)}
@@ -1781,6 +1796,14 @@
   }
 
   function renderStudyBreakdownCard(breakdown, title, emptyText) {
+    return renderShareBreakdownCard(breakdown, title, emptyText, "学习标签占比");
+  }
+
+  function renderLocationBreakdownCard(breakdown, title, emptyText) {
+    return renderShareBreakdownCard(breakdown, title, emptyText, "地点时间占比");
+  }
+
+  function renderShareBreakdownCard(breakdown, title, emptyText, ariaLabel) {
     if (!breakdown.total) {
       return `
         <section class="weekly-breakdown-card">
@@ -1792,7 +1815,7 @@
     return `
       <section class="weekly-breakdown-card">
         <h3>${escapeHtml(title)}</h3>
-        <div class="weekly-stacked-bar" aria-label="学习标签占比">
+        <div class="weekly-stacked-bar" aria-label="${escapeAttr(ariaLabel)}">
           ${breakdown.entries
             .map((entry) => `<span style="width:${entry.percent}%;background:${entry.color}" title="${escapeAttr(entry.label)} ${entry.percent}%"></span>`)
             .join("")}
@@ -1803,7 +1826,7 @@
               (entry) => `
                 <span>
                   <i class="color-dot" style="background:${entry.color}"></i>
-                  ${escapeHtml(entry.label)} ${entry.percent}%
+                  ${escapeHtml(entry.label)} ${entry.percent}%${entry.valueText ? ` · ${escapeHtml(entry.valueText)}` : ""}
                 </span>
               `,
             )
@@ -2494,6 +2517,7 @@
   function hasRecordSummaryExportData() {
     const dates = recentRecordChartDates();
     return (
+      locationBreakdownForDates(dates).total > 0 ||
       dates.some((itemDate) => studySummaryForDates([itemDate]).total > 0 || workSummaryForDates([itemDate]).total > 0) ||
       habitRateForDates(dates) > 0
     );
@@ -2525,7 +2549,13 @@
 
   function hasWeeklyReviewExportData(date) {
     const key = scopeKey("week", date);
-    return weeklyStudySummary(date).total > 0 || weeklyWorkSummary(date).total > 0 || weeklyStudyBreakdown(date).total > 0 || weeklyReviewHasText(readWeeklyReviewForKey(key));
+    return (
+      locationBreakdownForDates(datesInScope("week", date)).total > 0 ||
+      weeklyStudySummary(date).total > 0 ||
+      weeklyWorkSummary(date).total > 0 ||
+      weeklyStudyBreakdown(date).total > 0 ||
+      weeklyReviewHasText(readWeeklyReviewForKey(key))
+    );
   }
 
   function monthlyStatsHasData(date) {
@@ -2545,6 +2575,7 @@
     const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
     return (
       monthlyStatsHasData(date) ||
+      locationBreakdownForDates(datesInScope("month", date)).total > 0 ||
       monthlyStudyBreakdown(date).total > 0 ||
       monthlyWeeklySummaryHasData(date) ||
       Boolean(review.summary?.trim() || review.nextDirection?.trim())
@@ -2573,9 +2604,9 @@
 
   async function createExportItemCanvas(item, scope = state.activeTab) {
     const sourceCanvas = currentCanvasForExportItem(item);
-    if (sourceCanvas) return makeChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceCanvas);
+    if (sourceCanvas) return assertExportCanvasReadable(makeChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceCanvas), exportItemName(item));
     const sourceSvg = currentSvgForExportItem(item);
-    if (sourceSvg) return await makeSvgChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceSvg);
+    if (sourceSvg) return assertExportCanvasReadable(await makeSvgChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceSvg), exportItemName(item));
     const exportNode = buildSingleExportNode(item, scope);
     if (!exportNode) return null;
     const measureHost = document.createElement("div");
@@ -2588,10 +2619,328 @@
       const width = Math.ceil(exportNode.scrollWidth);
       const height = Math.ceil(exportNode.scrollHeight);
       if (!width || !height) throw new Error(`${exportItemName(item)}图片生成失败：模块尺寸为空。`);
-      return await renderNodeToCanvas(exportNode, width, height);
+      try {
+        return assertExportCanvasReadable(await renderNodeToCanvas(exportNode, width, height), exportItemName(item));
+      } catch (error) {
+        console.warn("Whole export render failed, trying chunks.", error);
+        return await renderExportNodeInChunks(exportNode, item, error);
+      }
     } finally {
       measureHost.remove();
     }
+  }
+
+  async function renderExportNodeInChunks(exportNode, item, originalError) {
+    const chunks = exportChunkNodes(exportNode);
+    const canvases = [];
+    for (const chunk of chunks) {
+      const chunkNode = buildExportChunkNode(chunk);
+      const chunkHost = document.createElement("div");
+      chunkHost.className = "review-export-measure";
+      chunkHost.style.width = `${exportCanvasCssWidth()}px`;
+      chunkHost.appendChild(chunkNode);
+      document.body.appendChild(chunkHost);
+      try {
+        const width = Math.ceil(chunkNode.scrollWidth);
+        const height = Math.ceil(chunkNode.scrollHeight);
+        if (width && height) canvases.push(assertExportCanvasReadable(await renderNodeToCanvas(chunkNode, width, height), exportItemName(item)));
+      } catch (error) {
+        console.warn("Export chunk render failed.", error);
+      } finally {
+        chunkHost.remove();
+      }
+    }
+    if (canvases.length) return combineExportCanvases(canvases);
+    const manual = makeManualExportCanvas(item) || makeManualTextExportCanvas(item, exportNode);
+    if (manual) return manual;
+    throw new Error(`${exportItemName(item)}导出失败：${originalError?.message || "浏览器限制渲染"}`);
+  }
+
+  function buildExportChunkNode(chunk) {
+    const node = document.createElement("div");
+    node.className = "review-export-sheet single-export-sheet review-export-chunk";
+    node.style.width = `${exportCanvasCssWidth()}px`;
+    const stack = document.createElement("div");
+    stack.className = "review-export-stack";
+    stack.appendChild(chunk.cloneNode(true));
+    node.appendChild(stack);
+    return node;
+  }
+
+  function exportChunkNodes(exportNode) {
+    const selector = [
+      ".export-date-line",
+      ".section-title",
+      ".weekly-brief-summary",
+      ".weekly-breakdown-card",
+      ".monthly-table-card",
+      ".review-item",
+      ".weekly-key-event",
+      ".weekly-reflection-card",
+      ".weekly-next-card",
+      ".monthly-next-card",
+      ".monthly-light-item",
+      ".monthly-insight-card",
+      ".segment-panel",
+      ".record-efficiency-band",
+      ".target-category-group",
+      ".habit-panel",
+    ].join(",");
+    const nodes = Array.from(exportNode.querySelectorAll(selector)).filter((node) => {
+      if (!node.textContent.trim() && !node.querySelector(".weekly-stacked-bar, table, canvas, svg")) return false;
+      return !Array.from(nodesWithSameSelectorParent(node, selector)).some((parent) => parent !== node);
+    });
+    if (nodes.length) return nodes;
+    const stack = exportNode.querySelector(".review-export-stack") || exportNode;
+    return Array.from(stack.children).filter((node) => node.textContent.trim() || node.querySelector("canvas, svg, table"));
+  }
+
+  function nodesWithSameSelectorParent(node, selector) {
+    const parents = [];
+    let current = node.parentElement;
+    while (current) {
+      if (current.matches?.(selector)) parents.push(current);
+      current = current.parentElement;
+    }
+    return parents;
+  }
+
+  function makeManualExportCanvas(item) {
+    if (item === "review-day") return makeManualDayReviewCanvas();
+    if (item === "review-week") return makeManualWeekReviewCanvas();
+    if (item === "review-month") return makeManualMonthReviewCanvas();
+    if (item === "record-logs") return makeManualRecordLogsCanvas();
+    return null;
+  }
+
+  function assertExportCanvasReadable(canvas, label = "图片") {
+    if (!(canvas instanceof HTMLCanvasElement)) throw new Error(`${label}图片生成失败：没有得到有效画布。`);
+    try {
+      const context = canvas.getContext("2d");
+      context?.getImageData(0, 0, 1, 1);
+      return canvas;
+    } catch (error) {
+      throw new Error(`${label}图片生成失败：浏览器限制读取渲染画布，已尝试备用导出。`);
+    }
+  }
+
+  function makeManualTextExportCanvas(item, exportNode) {
+    const lines = exportTextLines(exportNode);
+    if (!lines.length) return null;
+    return makeManualCardsCanvas(exportItemName(item), exportItemMeta(item), [
+      {
+        heading: "内容",
+        lines,
+        accent: colors[0],
+      },
+    ]);
+  }
+
+  function exportTextLines(root) {
+    const selectors = [
+      "h1",
+      "h2",
+      "h3",
+      ".entry-display-line",
+      ".review-text",
+      ".weekly-card-title",
+      ".monthly-stats-table tr",
+      ".weekly-breakdown-legend span",
+      ".target-category-header",
+      ".task-name",
+      ".habit-name",
+      ".habit-row",
+      "p",
+      "li",
+    ].join(",");
+    const seen = new Set();
+    return Array.from(root.querySelectorAll(selectors))
+      .map((node) => node.textContent.replace(/\s+/g, " ").trim())
+      .filter((text) => {
+        if (!text || seen.has(text)) return false;
+        seen.add(text);
+        return true;
+      })
+      .slice(0, 120);
+  }
+
+  function makeManualDayReviewCanvas() {
+    const date = reviewDate("day");
+    const cards = reviewItemsForExport("day", date)
+      .filter(reviewItemHasContent)
+      .map((item, index) => {
+        const review = normalizeReviewItem(item);
+        const lines = [];
+        if (review.phenomenon?.trim()) lines.push(review.phenomenon.trim());
+        review.reasons.forEach((reason, reasonIndex) => {
+          if (reason.text?.trim()) lines.push(`原因${reasonIndex + 1}：${reason.text.trim()}`);
+          if (reason.measure?.trim()) lines.push(`措施${reasonIndex + 1}：${reason.measure.trim()}`);
+        });
+        return { heading: `现象${index + 1}`, lines, accent: colors[index % colors.length] };
+      });
+    return makeManualCardsCanvas("日复盘", scopeDisplay("day", date), cards);
+  }
+
+  function makeManualWeekReviewCanvas() {
+    const date = reviewDate("week");
+    const review = readWeeklyReviewForKey(scopeKey("week", date));
+    const dates = datesInScope("week", date);
+    const study = weeklyStudySummary(date);
+    const work = weeklyWorkSummary(date);
+    const cards = [];
+    const holidaySummary = weeklyHolidaySummaryText(date);
+    if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    if (study.total || work.total) {
+      cards.push({
+        heading: "时间概览",
+        lines: [
+          `学习时长：${formatHourText(study.total)}`,
+          `工位时长：${formatHourText(work.total)}`,
+          `工位时间利用率：${workEfficiencyPercent(study.total, work.total)}%`,
+        ],
+        accent: "#39bff2",
+      });
+    }
+    appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates(dates));
+    appendBreakdownManualCard(cards, "学习标签占比", weeklyStudyBreakdown(date));
+    const keyEvents = keyEventsForDates(dates);
+    if (keyEvents.length) {
+      cards.push({
+        heading: "本周关键事项",
+        lines: keyEvents.map((event) => `${shortDateWeekdayText(event.date)} ${event.phenomenon || ""}`),
+        accent: "#8a7b35",
+      });
+    }
+    [
+      ["红灯", review.red],
+      ["绿灯", review.green],
+      ["总结", review.summary],
+      ["下周拟改进", review.nextDirection],
+    ].forEach(([heading, value], index) => {
+      const lines = locationDescriptionLines(value);
+      if (lines.length) cards.push({ heading, lines, accent: colors[index % colors.length] });
+    });
+    return makeManualCardsCanvas("周复盘", reviewNavigatorDisplay("week", date), cards);
+  }
+
+  function makeManualMonthReviewCanvas() {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    const dates = datesInScope("month", date);
+    const cards = [];
+    const holidaySummary = monthlyHolidaySummaryText(date);
+    if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates(dates));
+    appendBreakdownManualCard(cards, "学习标签占比（月）", monthlyStudyBreakdown(date));
+    [
+      ["总结", review.summary],
+      ["下月拟改进", review.nextDirection],
+      ["红灯情况说明", review.redInsight],
+      ["绿灯情况说明", review.greenInsight],
+    ].forEach(([heading, value], index) => {
+      const lines = locationDescriptionLines(value);
+      if (lines.length) cards.push({ heading, lines, accent: colors[index % colors.length] });
+    });
+    return makeManualCardsCanvas("月复盘", scopeDisplay("month", date), cards);
+  }
+
+  function makeManualRecordLogsCanvas() {
+    const logs = state.logs[dateKey()] || [];
+    const cards = recordTimelineBlocks(logs, { includeDrafts: false })
+      .filter((block) => block.logs.length)
+      .map((block, index) => ({
+        heading: block.title,
+        lines: block.logs.map((log) => {
+          const tag = getTag(log.tagId);
+          const target = targetNameForLogLink(log.targetId, dateKey());
+          return [tag?.name || "未分类", formatDuration(log.minutes), log.note || "", target ? `目标：${target}` : ""].filter(Boolean).join(" · ");
+        }),
+        accent: locationColor(block.type) || colors[index % colors.length],
+      }));
+    return makeManualCardsCanvas("今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`, cards);
+  }
+
+  function appendBreakdownManualCard(cards, heading, breakdown) {
+    if (!breakdown.total) return;
+    cards.push({
+      heading,
+      lines: breakdown.entries.map((entry) => `${entry.label} ${entry.percent}%${entry.valueText ? ` · ${entry.valueText}` : ""}`),
+      accent: breakdown.entries[0]?.color || colors[0],
+    });
+  }
+
+  function makeManualCardsCanvas(title, meta, cards) {
+    if (!cards.length) return null;
+    const scale = exportScale();
+    const cssWidth = exportCanvasCssWidth();
+    const padding = 14;
+    const cardPadding = 10;
+    const gap = 10;
+    const contentWidth = cssWidth - padding * 2;
+    const textWidth = contentWidth - cardPadding * 2;
+    const measure = document.createElement("canvas").getContext("2d");
+    if (!measure) return null;
+    const titleFont = "800 18px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    const headingFont = "800 14px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    const bodyFont = "650 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    measure.font = bodyFont;
+    const prepared = cards.map((card) => {
+      const lines = card.lines.flatMap((line) => wrapCanvasText(measure, line, textWidth));
+      return { ...card, wrappedLines: lines, height: cardPadding * 2 + 20 + Math.max(1, lines.length) * 18 };
+    });
+    const totalHeight = padding * 2 + 44 + prepared.reduce((sum, card) => sum + card.height, 0) + gap * Math.max(0, prepared.length - 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(cssWidth * scale);
+    canvas.height = Math.ceil(totalHeight * scale);
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.scale(scale, scale);
+    drawExportBackground(context, cssWidth, totalHeight);
+    context.fillStyle = "#20231f";
+    context.font = titleFont;
+    context.fillText(title, padding, padding + 18);
+    context.fillStyle = "#687068";
+    context.font = "700 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText(meta || "", padding, padding + 38);
+    let y = padding + 50;
+    prepared.forEach((card) => {
+      context.fillStyle = "#ffffff";
+      roundRectPath(context, padding, y, contentWidth, card.height, 8);
+      context.fill();
+      context.fillStyle = card.accent || colors[0];
+      context.fillRect(padding, y + 10, 3, card.height - 20);
+      context.fillStyle = "#20231f";
+      context.font = headingFont;
+      context.fillText(card.heading, padding + cardPadding, y + cardPadding + 10);
+      context.fillStyle = "#40463f";
+      context.font = bodyFont;
+      let lineY = y + cardPadding + 32;
+      (card.wrappedLines.length ? card.wrappedLines : [""]).forEach((line) => {
+        context.fillText(line, padding + cardPadding, lineY);
+        lineY += 18;
+      });
+      y += card.height + gap;
+    });
+    return canvas;
+  }
+
+  function wrapCanvasText(context, text, maxWidth) {
+    const value = String(text || "").trim();
+    if (!value) return [];
+    const lines = [];
+    let line = "";
+    Array.from(value).forEach((char) => {
+      const next = line + char;
+      if (line && context.measureText(next).width > maxWidth) {
+        lines.push(line);
+        line = char;
+      } else {
+        line = next;
+      }
+    });
+    if (line) lines.push(line);
+    return lines;
   }
 
   function buildSingleExportNode(item, scope = state.activeTab) {
@@ -2878,17 +3227,11 @@
   function renderExportItem(item) {
     const cloned = cloneExportSource(item);
     if (cloned) return cloned.outerHTML;
+    if (!item.startsWith("record-")) return "";
     const renderers = {
       "record-logs": renderRecordLogsExport,
       "record-location": renderRecordLocationExport,
       "record-summary": renderRecordSummaryExport,
-      "execute-targets": renderTargetsExport,
-      "execute-habits": renderHabitsExport,
-      "review-day": renderDayReviewExport,
-      "review-week": renderWeekReviewExport,
-      "review-month": renderMonthReviewExport,
-      "review-month-red": () => renderMonthLightExport("red"),
-      "review-month-green": () => renderMonthLightExport("green"),
     };
     return renderers[item]?.() || "";
   }
@@ -2901,6 +3244,9 @@
     const appendClone = (node) => {
       if (!node) return;
       fragment.appendChild(cloneNodeWithRenderedCanvases(node));
+    };
+    const appendHtml = (html) => {
+      htmlToExportNodes(html).forEach((node) => fragment.appendChild(node));
     };
 
     if (item === "record-logs") {
@@ -2922,11 +3268,25 @@
       appendClone(app.querySelector('[data-review-scope="week"]'));
     } else if (item === "review-month") {
       appendClone(app.querySelector('[data-review-scope="month"]'));
+    } else if (item === "review-month-red" || item === "review-month-green") {
+      const previousMode = ui.monthReviewMode;
+      try {
+        ui.monthReviewMode = item === "review-month-green" ? "green" : "red";
+        appendHtml(renderMonthlyReviewSection());
+      } finally {
+        ui.monthReviewMode = previousMode;
+      }
     }
 
     if (!fragment.children.length) return null;
     cleanExportClone(fragment, item);
     return fragment.children.length ? fragment : null;
+  }
+
+  function htmlToExportNodes(html) {
+    const template = document.createElement("template");
+    template.innerHTML = String(html || "").trim();
+    return Array.from(template.content.children);
   }
 
   function cloneNodeWithRenderedCanvases(node) {
@@ -2951,6 +3311,7 @@
     syncExportFormValues(fragment);
     replaceExportNavigators(fragment);
     $$(".review-due-reminder", fragment).forEach((node) => node.remove());
+    $$(".location-assign-select", fragment).forEach((node) => node.remove());
     $$("[data-draft='true'], .editing-entry", fragment).forEach((node) => node.remove());
     $$(".empty", fragment).forEach((node) => node.remove());
     if (item === "record-logs") {
@@ -3100,6 +3461,7 @@
         ${renderReviewNavigator("week")}
         <div class="section-title"><div><h2>周复盘</h2><p class="hint">${scopeDisplay("week", date)}</p></div></div>
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
+        ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("week", date)), "地点时间占比", "")}
         ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比", "") : ""}
         ${renderWeeklyReviewStatic(review)}
       </section>
@@ -3181,6 +3543,7 @@
         ${renderReviewNavigator("month")}
         <div class="section-title"><div><h2>月复盘</h2><p class="hint">${scopeDisplay("month", date)}</p></div></div>
         ${monthlyStatsHasData(date) ? renderMonthlyStatsTable(date, { omitEmptyRows: true }) : ""}
+        ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("month", date)), "地点时间占比", "")}
         ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比（月）", "") : ""}
         ${monthlyWeeklySummaryHasData(date) ? renderMonthlyWeeklySummaryList(date, { omitEmpty: true }) : ""}
         ${review.summary?.trim() ? `<section class="monthly-next-card">
@@ -3369,7 +3732,8 @@
       .review-export-sheet .toggle-button,
       .review-export-sheet .date-arrow,
       .review-export-sheet .date-calendar-button,
-      .review-export-sheet .axis-add-time {
+      .review-export-sheet .axis-add-time,
+      .review-export-sheet .location-assign-select {
         display: none !important;
       }
       .review-export-sheet .date-switch-panel {
@@ -3438,6 +3802,7 @@
           "地点记录框简化为空状态只显示地点名称和操作入口，支持地点描述、小圆点文本、事项记录和连续同地点时段合并。",
           "新增假期时间与期望学习/工位时长设置；假期不计算工位时长利用率，周复盘和月复盘会汇总显示假期信息。",
           "学习时间统计替代近七日汇总，图表支持左右滑动切换 7 日时间窗口，数值标签置顶并加背景描边，导出时同步使用当前窗口和当前勾选显示状态。",
+          "新增地点时间占比统计，记录页、周复盘和月复盘都会按当前地点顺序展示地点占比；未分配地点事项可手动归属到现有地点段。",
           "学习时间统计图改为水杯样式：工位时长为空心水蓝柱，学习时长为水色填充，滚动、刷新和滑动图表会触发杯内水面晃动。",
           "学习填满工位或只有学习无工位时，学习柱显示为固定冰块状态；工位时间利用率改为绿色折线，非假期无工位按 0 连线、假期跳过。",
           "导出图片重做为渲染级长图导出，提供预览、复制图片和保存图片；学习时间统计使用当前已渲染 SVG 直绘，避免纯文字导出。",
@@ -4674,6 +5039,9 @@
     if (actionNode.dataset.action === "toggle-expected-line") {
       toggleExpectedLine(actionNode.dataset.field, actionNode.checked);
     }
+    if (actionNode.dataset.action === "assign-location-block") {
+      assignLocationBlockLogs(actionNode);
+    }
     if (actionNode.dataset.action === "update-habit") {
       updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, true);
     }
@@ -4899,6 +5267,36 @@
     ui.locationDescriptionDrafts.set(noteKey, cleaned);
     saveState();
     if (options.render) render();
+  }
+
+  function locationAssignmentOptions(date = dateKey()) {
+    const counts = new Map();
+    return locationSlicesForRange(0, 1440, date)
+      .filter((slice) => slice.type && slice.type !== "empty")
+      .map((slice) => {
+        const nextCount = (counts.get(slice.type) || 0) + 1;
+        counts.set(slice.type, nextCount);
+        return {
+          id: slice.id,
+          label: `${locationLabel(slice.type)}${nextCount} ${minutesToTime(slice.start)}-${minutesToTime(slice.end)}`,
+        };
+      });
+  }
+
+  function assignLocationBlockLogs(selectNode) {
+    const targetId = selectNode.value;
+    const sourceIds = parseIdList(selectNode.dataset.sourceLocationIds || "");
+    if (!targetId || !sourceIds.length) return;
+    const sourceSet = new Set(sourceIds);
+    ui.logDrafts.forEach((log) => {
+      if (log.date === dateKey() && sourceSet.has(log.segmentId)) log.segmentId = targetId;
+    });
+    setState((draft) => {
+      draft.logs[dateKey()] ||= [];
+      draft.logs[dateKey()].forEach((log) => {
+        if (sourceSet.has(log.segmentId)) log.segmentId = targetId;
+      });
+    });
   }
 
   function editLog(logId) {
@@ -5656,6 +6054,31 @@
 
   function monthlyStudyBreakdown(date) {
     return studyBreakdownForDates(datesInScope("month", date));
+  }
+
+  function locationBreakdownForDates(dates) {
+    const totals = new Map();
+    dates.forEach((itemDate) => {
+      const daily = locationTotalsForDay(itemDate);
+      locationTypes().forEach((location) => {
+        const minutes = daily[`__loc_${location.id}`] || 0;
+        if (minutes > 0) totals.set(location.id, (totals.get(location.id) || 0) + minutes);
+      });
+    });
+    const total = sumMinutes(Array.from(totals.values()));
+    const entries = locationTypes()
+      .filter((location) => totals.has(location.id))
+      .map((location) => {
+        const minutes = totals.get(location.id) || 0;
+        return {
+          label: location.name,
+          minutes,
+          percent: total ? Math.round((minutes / total) * 100) : 0,
+          color: location.color,
+          valueText: formatHourShortText(minutes),
+        };
+      });
+    return { total, entries };
   }
 
   function studySummaryForDates(dates) {

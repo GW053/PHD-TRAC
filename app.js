@@ -433,18 +433,8 @@
         <section class="section-band record-efficiency-band">
           ${renderWorkEfficiencyStrip("day", dateKey())}
         </section>
-        <section class="section-band today-summary">
-          <div class="section-title compact-title">
-            <div>
-              <div class="summary-heading-line">
-                <h2>学习时间统计</h2>
-              </div>
-              <p class="hint">${recordChartRangeText()}</p>
-            </div>
-            ${renderRecordChartControls()}
-          </div>
-          ${renderRecordSummaries()}
-        </section>
+        ${renderRecordLocationSummary()}
+        ${renderRecordLearningSummarySection()}
         ${renderRecordBottomSettings()}
       </section>
     `;
@@ -477,7 +467,7 @@
     const blocks = recordTimelineBlocks(logs, options);
     const draftLogs = options.includeDrafts !== false ? [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey()) : [];
     const visibleBlocks = options.requireLogs
-      ? blocks.filter((block) => block.logs.length || block.drafts.length || locationDescriptionForIds(block.ids || [block.id]))
+      ? blocks.filter((block) => shouldRenderRecordTimelineBlock(block, options))
       : blocks;
     const blockByAxisKey = new Map(
       visibleBlocks
@@ -491,7 +481,7 @@
         let block = blockByAxisKey.get(key) || null;
         if (!block && slice.type) {
           block = timelineBlockFromSlice(slice, logs, draftLogs);
-          if (options.requireLogs && !block.logs.length && !block.drafts.length && !locationDescriptionForIds(block.ids || [block.id])) block = null;
+          if (options.requireLogs && !shouldRenderRecordTimelineBlock(block, options)) block = null;
         }
         return renderTimelineRow(slice, index, slices.length, range.start, total, block);
       })
@@ -503,6 +493,15 @@
         ${slices.some((slice) => slice.auto) ? `<button class="axis-add-time" type="button" data-action="add-location-time">添加时间</button>` : ""}
       </div>
     `;
+  }
+
+  function shouldRenderRecordTimelineBlock(block, options = {}) {
+    if (!block) return false;
+    if (!options.requireLogs) return true;
+    const ids = block.ids || [block.id];
+    const hasEntries = Boolean(block.logs?.length || block.drafts?.length);
+    if (hasEntries || locationDescriptionForIds(ids)) return true;
+    return Boolean(options.includeEmptyNonOutdoor && block.type && block.type !== DEFAULT_LOCATION_ID && block.start);
   }
 
   function renderTimelineRow(slice, index, count, rangeStart, total, block = null) {
@@ -1059,11 +1058,36 @@
     `;
   }
 
+  function renderRecordLocationSummary() {
+    const dates = recentRecordChartDates();
+    return `
+      <section class="section-band record-location-summary">
+        ${renderLocationBreakdownCard(locationBreakdownForDates(dates), "地点时间占比", "所选范围还没有地点时间。")}
+      </section>
+    `;
+  }
+
+  function renderRecordLearningSummarySection() {
+    return `
+      <section class="section-band today-summary">
+        <div class="section-title compact-title">
+          <div>
+            <div class="summary-heading-line">
+              <h2>学习时间统计</h2>
+            </div>
+            <p class="hint">${recordChartRangeText()}</p>
+          </div>
+          ${renderRecordChartControls()}
+        </div>
+        ${renderRecordSummaries()}
+      </section>
+    `;
+  }
+
   function renderRecordSummaries() {
     const dates = recentRecordChartDates();
     return `
       <section class="summary-scope-card active-summary-scope">
-        ${renderLocationBreakdownCard(locationBreakdownForDates(dates), "地点时间占比", "所选范围还没有地点时间。")}
         ${renderRecordTrendChart(dates)}
         <div class="stat-list habit-rate-row">
           <div class="stat-row">
@@ -2314,10 +2338,19 @@
           status.dataset.tone = tone;
         };
         const selectedExportItems = () => $$("input[name='export-item']:checked", backdrop).map((input) => input.value);
-        const showExportCanvasPreview = (canvas) => {
+        let exportPreviewUrl = "";
+        const clearExportPreviewUrl = () => {
+          if (!exportPreviewUrl) return;
+          URL.revokeObjectURL(exportPreviewUrl);
+          exportPreviewUrl = "";
+        };
+        const showExportCanvasPreview = async (canvas) => {
           const image = $("#export-image", backdrop);
           const empty = $("#export-empty", backdrop);
-          image.src = canvas.toDataURL("image/png");
+          const blob = await canvasToBlob(canvas, "导出预览");
+          clearExportPreviewUrl();
+          exportPreviewUrl = URL.createObjectURL(blob);
+          image.src = exportPreviewUrl;
           image.classList.remove("hidden");
           empty.classList.add("hidden");
         };
@@ -2330,6 +2363,7 @@
           latestExportResult = null;
           latestExportValues = items;
           if (!items.length) {
+            clearExportPreviewUrl();
             image.removeAttribute("src");
             image.classList.add("hidden");
             empty.textContent = enabledCount ? "请至少勾选一项内容。" : "当前页暂无可导出内容。";
@@ -2346,7 +2380,7 @@
             if (ticket !== exportPreviewTicket) return;
             latestExportResult = result;
             latestExportValues = items;
-            showExportCanvasPreview(result.canvas);
+            await showExportCanvasPreview(result.canvas);
           } catch (error) {
             console.warn(error);
             if (ticket !== exportPreviewTicket) return;
@@ -2367,7 +2401,7 @@
               : await createExportCanvas(items, exportScope);
             latestExportResult = result;
             latestExportValues = items;
-            showExportCanvasPreview(result.canvas);
+            await showExportCanvasPreview(result.canvas);
             if (mode === "copy") {
               await copyCanvasImage(result.canvas);
               setExportStatus("已复制图片。", "success");
@@ -2427,9 +2461,10 @@
           ["review-week", "周复盘", reviewNavigatorDisplay("week", reviewDate("week"))],
         ],
         month: [
-          ["review-month", "月复盘", scopeDisplay("month", reviewDate("month"))],
-          ["review-month-red", "月红灯情况", scopeDisplay("month", reviewDate("month"))],
-          ["review-month-green", "月绿灯情况", scopeDisplay("month", reviewDate("month"))],
+          ["review-month", "月复盘概览", scopeDisplay("month", reviewDate("month"))],
+          ["review-month-red", "红灯情况说明", scopeDisplay("month", reviewDate("month"))],
+          ["review-month-green", "绿灯情况说明", scopeDisplay("month", reviewDate("month"))],
+          ["review-month-summary", "月总结", scopeDisplay("month", reviewDate("month"))],
         ],
       }[state.reviewScope || "day"];
       return [["复盘", reviewItems]];
@@ -2439,7 +2474,7 @@
         "记录",
         [
           ["record-logs", "今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`],
-          ["record-summary", "学习时间统计", recordChartRangeText()],
+          ["record-summary", "地点与学习统计", recordChartRangeText()],
         ],
       ],
     ];
@@ -2449,14 +2484,15 @@
     const names = {
       "record-logs": "今日时间记录",
       "record-location": "地点时间",
-      "record-summary": "学习时间统计",
+      "record-summary": "地点与学习统计",
       "execute-targets": "目标情况",
       "execute-habits": "习惯情况",
       "review-day": "日复盘",
       "review-week": "周复盘",
-      "review-month": "月复盘",
-      "review-month-red": "月红灯情况",
-      "review-month-green": "月绿灯情况",
+      "review-month": "月复盘概览",
+      "review-month-red": "红灯情况说明",
+      "review-month-green": "绿灯情况说明",
+      "review-month-summary": "月总结",
     };
     return names[item] || "导出图片";
   }
@@ -2468,7 +2504,7 @@
     if (item === "execute-habits") return habitTrailRangeText();
     if (item === "review-day") return scopeDisplay("day", reviewDate("day"));
     if (item === "review-week") return reviewNavigatorDisplay("week", reviewDate("week"));
-    if (item === "review-month" || item === "review-month-red" || item === "review-month-green") return scopeDisplay("month", reviewDate("month"));
+    if (item === "review-month" || item === "review-month-red" || item === "review-month-green" || item === "review-month-summary") return scopeDisplay("month", reviewDate("month"));
     return exportScopeTitle(scope);
   }
 
@@ -2501,7 +2537,7 @@
 
   function hasExportData(item) {
     const day = dateKey();
-    if (item === "record-logs") return (state.logs[day] || []).some((entry) => Number(entry.minutes) > 0 || entry.note || entry.targetId);
+    if (item === "record-logs") return hasRecordLogExportData(day);
     if (item === "record-location") return locationEntriesForDate(day, locationRecordsForDate(day)).some((entry) => entry.type && (entry.start || entry.end));
     if (item === "record-summary") return hasRecordSummaryExportData();
     if (item === "execute-targets") return targetsForCurrentScope().length > 0;
@@ -2511,7 +2547,17 @@
     if (item === "review-month") return hasMonthlyReviewExportData(reviewDate("month"));
     if (item === "review-month-red") return hasMonthlyLightExportData("red", reviewDate("month"));
     if (item === "review-month-green") return hasMonthlyLightExportData("green", reviewDate("month"));
+    if (item === "review-month-summary") return hasMonthlySummaryExportData(reviewDate("month"));
     return false;
+  }
+
+  function hasRecordLogExportData(day = dateKey()) {
+    const logs = state.logs[day] || [];
+    if (logs.some((entry) => Number(entry.minutes) > 0 || entry.note || entry.targetId)) return true;
+    if (day !== dateKey()) return false;
+    return recordTimelineBlocks(logs, { includeDrafts: false }).some((block) =>
+      shouldRenderRecordTimelineBlock(block, { requireLogs: true, includeEmptyNonOutdoor: true }),
+    );
   }
 
   function hasRecordSummaryExportData() {
@@ -2571,14 +2617,10 @@
   }
 
   function hasMonthlyReviewExportData(date) {
-    const key = scopeKey("month", date);
-    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
     return (
       monthlyStatsHasData(date) ||
       locationBreakdownForDates(datesInScope("month", date)).total > 0 ||
-      monthlyStudyBreakdown(date).total > 0 ||
-      monthlyWeeklySummaryHasData(date) ||
-      Boolean(review.summary?.trim() || review.nextDirection?.trim())
+      monthlyStudyBreakdown(date).total > 0
     );
   }
 
@@ -2589,16 +2631,29 @@
     return Boolean(insight?.trim()) || monthWeekBuckets(date).some((bucket) => readWeeklyReviewForKey(bucket.key)[mode]?.trim());
   }
 
+  function hasMonthlySummaryExportData(date) {
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    return monthlyWeeklySummaryHasData(date) || Boolean(review.summary?.trim() || review.nextDirection?.trim());
+  }
+
   async function createExportCanvas(items, scope = state.activeTab) {
     const exportItems = [];
     for (const item of items) {
-      const canvas = await createExportItemCanvas(item, scope);
+      let canvas = null;
+      try {
+        canvas = await createExportItemCanvas(item, scope);
+      } catch (error) {
+        console.warn("Export item render failed; trying last-resort canvas.", item, error);
+        canvas = createLastResortExportCanvas(item, scope, error);
+      }
       if (canvas) exportItems.push({ name: exportItemName(item), canvas });
     }
     if (!exportItems.length) throw new Error("当前选择的内容没有可导出的渲染结果。");
+    const output = exportItems.length === 1 ? exportItems[0].canvas : combineExportCanvases(exportItems.map((entry) => entry.canvas));
     return {
       items: exportItems,
-      canvas: exportItems.length === 1 ? exportItems[0].canvas : combineExportCanvases(exportItems.map((entry) => entry.canvas)),
+      canvas: assertExportCanvasReadable(output, exportItems.length === 1 ? exportItems[0].name : "导出长图"),
     };
   }
 
@@ -2630,9 +2685,25 @@
     }
   }
 
+  function createLastResortExportCanvas(item, scope, originalError) {
+    const manual = makeManualExportCanvas(item);
+    if (manual) return assertExportCanvasReadable(manual, exportItemName(item));
+    if (item.startsWith("record-")) {
+      try {
+        const exportNode = buildSingleExportNode(item, scope);
+        const textCanvas = exportNode ? makeManualTextExportCanvas(item, exportNode) : null;
+        if (textCanvas) return assertExportCanvasReadable(textCanvas, exportItemName(item));
+      } catch (error) {
+        console.warn("Last-resort text export failed.", error);
+      }
+    }
+    throw new Error(`${exportItemName(item)}导出失败：${originalError?.message || "浏览器限制渲染"}`);
+  }
+
   async function renderExportNodeInChunks(exportNode, item, originalError) {
     const chunks = exportChunkNodes(exportNode);
     const canvases = [];
+    let failedChunks = 0;
     for (const chunk of chunks) {
       const chunkNode = buildExportChunkNode(chunk);
       const chunkHost = document.createElement("div");
@@ -2645,14 +2716,16 @@
         const height = Math.ceil(chunkNode.scrollHeight);
         if (width && height) canvases.push(assertExportCanvasReadable(await renderNodeToCanvas(chunkNode, width, height), exportItemName(item)));
       } catch (error) {
+        failedChunks += 1;
         console.warn("Export chunk render failed.", error);
       } finally {
         chunkHost.remove();
       }
     }
+    if (canvases.length && !failedChunks) return combineExportCanvases(canvases);
+    const manual = makeManualExportCanvas(item) || (item.startsWith("record-") ? makeManualTextExportCanvas(item, exportNode) : null);
+    if (manual) return assertExportCanvasReadable(manual, exportItemName(item));
     if (canvases.length) return combineExportCanvases(canvases);
-    const manual = makeManualExportCanvas(item) || makeManualTextExportCanvas(item, exportNode);
-    if (manual) return manual;
     throw new Error(`${exportItemName(item)}导出失败：${originalError?.message || "浏览器限制渲染"}`);
   }
 
@@ -2681,6 +2754,10 @@
       ".monthly-next-card",
       ".monthly-light-item",
       ".monthly-insight-card",
+      ".record-location-summary",
+      ".summary-scope-card",
+      ".record-trend-card",
+      ".stat-list",
       ".segment-panel",
       ".record-efficiency-band",
       ".target-category-group",
@@ -2708,7 +2785,12 @@
   function makeManualExportCanvas(item) {
     if (item === "review-day") return makeManualDayReviewCanvas();
     if (item === "review-week") return makeManualWeekReviewCanvas();
-    if (item === "review-month") return makeManualMonthReviewCanvas();
+    if (item === "review-month") return makeManualMonthOverviewCanvas();
+    if (item === "review-month-red") return makeManualMonthLightCanvas("red");
+    if (item === "review-month-green") return makeManualMonthLightCanvas("green");
+    if (item === "review-month-summary") return makeManualMonthSummaryCanvas();
+    if (item === "execute-targets") return makeManualTargetsCanvas();
+    if (item === "execute-habits") return makeManualHabitsCanvas();
     if (item === "record-logs") return makeManualRecordLogsCanvas();
     return null;
   }
@@ -2770,13 +2852,21 @@
       .filter(reviewItemHasContent)
       .map((item, index) => {
         const review = normalizeReviewItem(item);
-        const lines = [];
-        if (review.phenomenon?.trim()) lines.push(review.phenomenon.trim());
-        review.reasons.forEach((reason, reasonIndex) => {
-          if (reason.text?.trim()) lines.push(`原因${reasonIndex + 1}：${reason.text.trim()}`);
-          if (reason.measure?.trim()) lines.push(`措施${reasonIndex + 1}：${reason.measure.trim()}`);
-        });
-        return { heading: `现象${index + 1}`, lines, accent: colors[index % colors.length] };
+        return {
+          type: "day-review",
+          heading: `现象${index + 1}`,
+          phenomenonLabel: `现象${index + 1}`,
+          phenomenon: review.phenomenon?.trim() || "",
+          starred: Boolean(review.starred),
+          reasons: review.reasons
+            .map((reason, reasonIndex) => ({
+              label: `原因${reasonIndex + 1}`,
+              text: reason.text?.trim() || "",
+              measure: reason.measure?.trim() || "",
+            }))
+            .filter((reason) => reason.text || reason.measure),
+          accent: cssVarColor("--accent", colors[index % colors.length]),
+        };
       });
     return makeManualCardsCanvas("日复盘", scopeDisplay("day", date), cards);
   }
@@ -2845,6 +2935,128 @@
     return makeManualCardsCanvas("月复盘", scopeDisplay("month", date), cards);
   }
 
+  function makeManualMonthOverviewCanvas() {
+    const date = reviewDate("month");
+    const dates = datesInScope("month", date);
+    const cards = [];
+    const holidaySummary = monthlyHolidaySummaryText(date);
+    if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    appendMonthlyStatsManualCard(cards, date);
+    appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates(dates));
+    appendBreakdownManualCard(cards, "学习标签占比（月）", monthlyStudyBreakdown(date));
+    return makeManualCardsCanvas("月复盘概览", scopeDisplay("month", date), cards);
+  }
+
+  function makeManualMonthLightCanvas(mode) {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    const label = mode === "red" ? "红灯" : "绿灯";
+    const title = mode === "red" ? "红灯情况说明" : "绿灯情况说明";
+    const accent = mode === "red" ? "#d7655b" : "#4d8b57";
+    const cards = monthWeekBuckets(date)
+      .map((bucket, index) => ({ ...bucket, index, value: readWeeklyReviewForKey(bucket.key)[mode] || "" }))
+      .filter((bucket) => bucket.value.trim())
+      .map((bucket) => ({
+        heading: `第${bucket.index + 1}周 · ${label}`,
+        lines: locationDescriptionLines(bucket.value),
+        accent,
+      }));
+    const insight = mode === "red" ? review.redInsight : review.greenInsight;
+    const insightLines = locationDescriptionLines(insight);
+    if (insightLines.length) cards.push({ heading: title, lines: insightLines, accent });
+    return makeManualCardsCanvas(title, scopeDisplay("month", date), cards);
+  }
+
+  function makeManualMonthSummaryCanvas() {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = normalizeMonthlyReview(state.monthlyReviews?.[key] || {});
+    const cards = [];
+    monthWeekBuckets(date)
+      .map((bucket, index) => ({ ...bucket, index, summary: readWeeklyReviewForKey(bucket.key).summary || "" }))
+      .filter((bucket) => bucket.summary.trim())
+      .forEach((bucket) => {
+        cards.push({
+          heading: `第${bucket.index + 1}周 · 总结`,
+          lines: locationDescriptionLines(bucket.summary),
+          accent: "#b59827",
+        });
+      });
+    [
+      ["总结", review.summary, "#b59827"],
+      ["下月拟改进", review.nextDirection, "#3a82b8"],
+    ].forEach(([heading, value, accent]) => {
+      const lines = locationDescriptionLines(value);
+      if (lines.length) cards.push({ heading, lines, accent });
+    });
+    return makeManualCardsCanvas("月总结", scopeDisplay("month", date), cards);
+  }
+
+  function makeManualHabitsCanvas() {
+    const dates = lastNDates(dateKey(), 7);
+    const cards = (state.habits || []).map((habit) => {
+      const color = habit.color || colors[0];
+      const values = dates.map((itemDate) => clamp(Number(habit.records?.[itemDate]) || 0, 0, 100));
+      return {
+        type: "habit",
+        heading: habit.name || "未命名习惯",
+        color,
+        values,
+        todayPercent: clamp(Number(habit.records?.[dateKey()]) || 0, 0, 100),
+        accent: color,
+      };
+    });
+    return makeManualCardsCanvas("习惯情况", habitTrailRangeText(), cards);
+  }
+
+  function makeManualTargetsCanvas() {
+    const targets = targetsForCurrentScope();
+    const tags = targetTagList(targets);
+    const visibleTags = ui.targetFilterTag === "__all" ? tags : [ui.targetFilterTag];
+    const cards = visibleTags.flatMap((tag, tagIndex) => {
+      return targets
+        .filter((target) => targetTag(target) === tag)
+        .sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)))
+        .map((target) => {
+          const progress = targetProgress(target);
+          return {
+            type: "target",
+            heading: target.name || "未命名目标",
+            tag,
+            done: isTaskDone(target),
+            age: `执行第${executionDays(target) + 1}天`,
+            spent: `记录时长 ${formatDuration(targetLoggedMinutes(target))}`,
+            description: target.description || "",
+            hasProgress: Boolean(target.hasProgress),
+            progress,
+            subtasks: [],
+            accent: colors[tagIndex % colors.length],
+          };
+        });
+    });
+    return makeManualCardsCanvas("目标情况", scopeDisplay("day", dateKey()), cards);
+  }
+
+  function flattenManualTargetSubtasks(items = [], level = 2) {
+    return [...items]
+      .sort((a, b) => Number(isSubtaskDone(a)) - Number(isSubtaskDone(b)))
+      .flatMap((item) => {
+        const hasContent = String(item.name || "").trim() || String(item.description || "").trim() || item.completedAt || Number(item.done) > 0;
+        if (!hasContent) return [];
+        const row = {
+          level,
+          name: item.name || "未命名任务",
+          done: isSubtaskDone(item),
+          description: item.description || "",
+          completedAt: item.completedAt || "",
+          hasProgress: item.hasProgress !== false,
+          progressText: item.hasProgress !== false ? `${item.done || 0}/${item.total || 1}` : "",
+        };
+        return [row, ...flattenManualTargetSubtasks(item.children || [], level + 1)];
+      });
+  }
+
   function makeManualRecordLogsCanvas() {
     const logs = state.logs[dateKey()] || [];
     const cards = recordTimelineBlocks(logs, { includeDrafts: false })
@@ -2864,10 +3076,29 @@
   function appendBreakdownManualCard(cards, heading, breakdown) {
     if (!breakdown.total) return;
     cards.push({
+      type: "breakdown",
       heading,
       lines: breakdown.entries.map((entry) => `${entry.label} ${entry.percent}%${entry.valueText ? ` · ${entry.valueText}` : ""}`),
+      entries: breakdown.entries,
       accent: breakdown.entries[0]?.color || colors[0],
     });
+  }
+
+  function appendMonthlyStatsManualCard(cards, date) {
+    const rows = monthWeekBuckets(date)
+      .map((bucket, index) => {
+        const study = studySummaryForDates(bucket.dates);
+        const work = workSummaryForDates(bucket.dates);
+        const studyAverage = study.recordedDays ? study.total / study.recordedDays : 0;
+        const workAverage = work.recordedDays ? work.total / work.recordedDays : 0;
+        return {
+          hasData: study.total > 0 || work.total > 0,
+          text: `第${index + 1}周 学习${formatHourShortText(study.total)}（${formatHourShortText(studyAverage)}） · 工位${formatHourShortText(work.total)}（${formatHourShortText(workAverage)}） · 利用率${workEfficiencyPercent(study.total, work.total)}%`,
+        };
+      })
+      .filter((row) => row.hasData)
+      .map((row) => row.text);
+    if (rows.length) cards.push({ heading: "月统计", lines: rows, accent: "#39bff2" });
   }
 
   function makeManualCardsCanvas(title, meta, cards) {
@@ -2886,8 +3117,14 @@
     const bodyFont = "650 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
     measure.font = bodyFont;
     const prepared = cards.map((card) => {
-      const lines = card.lines.flatMap((line) => wrapCanvasText(measure, line, textWidth));
-      return { ...card, wrappedLines: lines, height: cardPadding * 2 + 20 + Math.max(1, lines.length) * 18 };
+      if (card.type === "day-review") return prepareManualDayReviewCard(card, measure, textWidth, cardPadding);
+      if (card.type === "habit") return prepareManualHabitCard(card, measure, textWidth, cardPadding);
+      if (card.type === "target") return prepareManualTargetCard(card, measure, textWidth, cardPadding);
+      const entries = card.type === "breakdown" ? card.entries || [] : [];
+      const lines = (card.type === "breakdown" ? entries.map((entry) => `${entry.label} ${entry.percent}%${entry.valueText ? ` · ${entry.valueText}` : ""}`) : card.lines || [])
+        .flatMap((line) => wrapCanvasText(measure, line, textWidth - (card.type === "breakdown" ? 18 : 0)));
+      const extraHeight = card.type === "breakdown" ? 28 : 0;
+      return { ...card, wrappedLines: lines, height: cardPadding * 2 + 20 + extraHeight + Math.max(1, lines.length) * 18 };
     });
     const totalHeight = padding * 2 + 44 + prepared.reduce((sum, card) => sum + card.height, 0) + gap * Math.max(0, prepared.length - 1);
     const canvas = document.createElement("canvas");
@@ -2910,19 +3147,401 @@
       context.fill();
       context.fillStyle = card.accent || colors[0];
       context.fillRect(padding, y + 10, 3, card.height - 20);
-      context.fillStyle = "#20231f";
-      context.font = headingFont;
-      context.fillText(card.heading, padding + cardPadding, y + cardPadding + 10);
+      if (card.type !== "day-review" && card.type !== "habit" && card.type !== "target") {
+        context.fillStyle = "#20231f";
+        context.font = headingFont;
+        context.fillText(card.heading, padding + cardPadding, y + cardPadding + 10);
+      }
       context.fillStyle = "#40463f";
       context.font = bodyFont;
-      let lineY = y + cardPadding + 32;
-      (card.wrappedLines.length ? card.wrappedLines : [""]).forEach((line) => {
-        context.fillText(line, padding + cardPadding, lineY);
-        lineY += 18;
-      });
+      let lineY = y + cardPadding + (card.type === "day-review" || card.type === "habit" || card.type === "target" ? 10 : 32);
+      if (card.type === "breakdown") {
+        drawManualBreakdownBar(context, card.entries || [], padding + cardPadding, lineY - 14, textWidth);
+        lineY += 28;
+        lineY = drawManualBreakdownLegend(context, card.entries || [], padding + cardPadding, lineY, textWidth, bodyFont, measure);
+      } else if (card.type === "day-review") {
+        drawManualDayReviewCard(context, card, padding + cardPadding, lineY, textWidth, bodyFont);
+      } else if (card.type === "habit") {
+        drawManualHabitCard(context, card, padding + cardPadding, lineY, textWidth, bodyFont);
+      } else if (card.type === "target") {
+        drawManualTargetCard(context, card, padding + cardPadding, lineY, textWidth, bodyFont);
+      } else {
+        (card.wrappedLines.length ? card.wrappedLines : [""]).forEach((line) => {
+          context.fillText(line, padding + cardPadding, lineY);
+          lineY += 18;
+        });
+      }
       y += card.height + gap;
     });
     return canvas;
+  }
+
+  function prepareManualDayReviewCard(card, measure, textWidth, cardPadding) {
+    const phenomenonLines = wrapCanvasText(measure, card.phenomenon || "", textWidth);
+    const reasons = (card.reasons || []).map((reason) => ({
+      ...reason,
+      textLines: wrapCanvasText(measure, reason.text || "", textWidth),
+      measureLines: wrapCanvasText(measure, reason.measure || "", textWidth),
+    }));
+    const reasonHeight = reasons.reduce((sum, reason) => {
+      const reasonTextHeight = Math.max(1, reason.textLines.length) * 18;
+      const measureHeight = reason.measureLines.length ? 22 + reason.measureLines.length * 18 : 0;
+      return sum + 23 + reasonTextHeight + measureHeight + 6;
+    }, 0);
+    return {
+      ...card,
+      phenomenonLines,
+      reasons,
+      height: cardPadding * 2 + 26 + Math.max(1, phenomenonLines.length) * 18 + reasonHeight,
+    };
+  }
+
+  function drawManualDayReviewCard(context, card, x, y, width, bodyFont) {
+    const tones = manualReviewTones();
+    let cursor = y;
+    drawManualReviewLabel(context, "phenomenon", card.phenomenonLabel || card.heading || "现象", x, cursor, tones);
+    if (card.starred) {
+      context.fillStyle = "#d7a52d";
+      context.font = "800 15px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+      context.fillText("★", x + width - 18, cursor + 1);
+    }
+    cursor += 23;
+    cursor = drawManualWrappedLines(context, card.phenomenonLines, x, cursor, bodyFont);
+    (card.reasons || []).forEach((reason) => {
+      cursor += 4;
+      drawManualReviewLabel(context, "reason", reason.label || "原因", x, cursor, tones);
+      cursor += 23;
+      cursor = drawManualWrappedLines(context, reason.textLines, x, cursor, bodyFont);
+      if (reason.measureLines?.length) {
+        cursor += 4;
+        drawManualReviewLabel(context, "measure", "措施", x, cursor, tones);
+        cursor += 23;
+        cursor = drawManualWrappedLines(context, reason.measureLines, x, cursor, bodyFont);
+      }
+    });
+  }
+
+  function drawManualWrappedLines(context, lines, x, y, font) {
+    context.fillStyle = "#20231f";
+    context.font = font;
+    const visible = lines?.length ? lines : [""];
+    visible.forEach((line) => {
+      if (line) context.fillText(line, x, y);
+      y += 18;
+    });
+    return y;
+  }
+
+  function drawManualReviewLabel(context, tone, label, x, y, tones) {
+    const color = tones[tone] || tones.phenomenon;
+    context.save();
+    context.fillStyle = color;
+    context.strokeStyle = color;
+    context.lineWidth = 3;
+    if (tone === "reason") {
+      context.beginPath();
+      context.moveTo(x, y - 9);
+      context.lineTo(x, y + 3);
+      context.lineTo(x + 10, y - 3);
+      context.closePath();
+      context.fill();
+    } else if (tone === "measure") {
+      context.beginPath();
+      context.moveTo(x + 1, y - 4);
+      context.lineTo(x + 5, y);
+      context.lineTo(x + 13, y - 9);
+      context.stroke();
+    } else {
+      context.beginPath();
+      context.arc(x + 6, y - 4, 5.5, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.fillStyle = color;
+    context.font = "800 13px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText(label, x + 20, y);
+    context.restore();
+  }
+
+  function manualReviewTones() {
+    return {
+      phenomenon: cssVarColor("--accent", "#2f6f73"),
+      reason: cssVarColor("--accent-2", "#4f8f66"),
+      measure: cssVarColor("--accent-3", "#b59827"),
+    };
+  }
+
+  function cssVarColor(name, fallback) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+
+  function prepareManualHabitCard(card, measure, textWidth, cardPadding) {
+    const headingLines = wrapCanvasText(measure, card.heading || "", textWidth);
+    return {
+      ...card,
+      headingLines,
+      height: cardPadding * 2 + Math.max(1, headingLines.length) * 18 + 42,
+    };
+  }
+
+  function drawManualHabitCard(context, card, x, y, width, bodyFont) {
+    context.font = "800 14px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillStyle = "#20231f";
+    let cursor = y;
+    (card.headingLines?.length ? card.headingLines : [card.heading || ""]).forEach((line) => {
+      if (line) context.fillText(line, x, cursor);
+      cursor += 18;
+    });
+    const values = card.values || [];
+    const gap = 7;
+    const slot = 24;
+    const totalWidth = values.length * slot + Math.max(0, values.length - 1) * gap;
+    let dotX = x + Math.max(0, width - totalWidth);
+    const centerY = cursor + 13;
+    values.forEach((value) => {
+      drawManualHabitMark(context, value, card.color || colors[0], dotX + slot / 2, centerY);
+      dotX += slot + gap;
+    });
+    context.fillStyle = "#687068";
+    context.font = bodyFont;
+    context.fillText(`今日 ${Math.round(card.todayPercent || 0)}%`, x, cursor + 18);
+  }
+
+  function drawManualHabitMark(context, value, color, cx, cy) {
+    const percent = clamp(Number(value) || 0, 0, 100);
+    if (percent <= 0) {
+      context.save();
+      context.strokeStyle = "#d7ddd4";
+      context.lineWidth = 1.2;
+      context.setLineDash([3, 3]);
+      context.beginPath();
+      context.arc(cx, cy, 8, Math.PI * 0.15, Math.PI * 1.15);
+      context.stroke();
+      context.restore();
+      return;
+    }
+    if (percent >= 100) {
+      drawManualFlower(context, color, cx, cy);
+      return;
+    }
+    const radius = 3.5 + (percent / 100) * 7.5;
+    context.fillStyle = color;
+    context.globalAlpha = 0.88;
+    context.beginPath();
+    context.arc(cx, cy, radius, 0, Math.PI * 2);
+    context.fill();
+    context.globalAlpha = 1;
+  }
+
+  function drawManualFlower(context, color, cx, cy) {
+    context.save();
+    context.fillStyle = color;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.font = "900 22px 'Segoe UI Symbol', 'Microsoft YaHei', sans-serif";
+    context.fillText("✿", cx, cy + 0.5);
+    context.restore();
+  }
+
+  function prepareManualTargetCard(card, measure, textWidth, cardPadding) {
+    const headingLines = wrapCanvasText(measure, card.heading || "", textWidth - 70);
+    const descriptionLines = wrapCanvasText(measure, card.description || "", textWidth);
+    const subtasks = (card.subtasks || []).map((row) => ({
+      ...row,
+      nameLines: wrapCanvasText(measure, `${row.name}${row.progressText ? `（${row.progressText}）` : ""}`, textWidth - 20 - Math.max(0, row.level - 2) * 16),
+      descriptionLines: wrapCanvasText(measure, row.description || "", textWidth - 20 - Math.max(0, row.level - 2) * 16),
+    }));
+    const subtaskHeight = subtasks.reduce((sum, row) => {
+      return sum + Math.max(1, row.nameLines.length) * 17 + row.descriptionLines.length * 16 + (row.completedAt ? 16 : 0) + 7;
+    }, 0);
+    const metaHeight = 34;
+    const progressHeight = card.hasProgress ? 20 : 0;
+    return {
+      ...card,
+      headingLines,
+      descriptionLines,
+      subtasks,
+      height:
+        cardPadding * 2 +
+        Math.max(1, headingLines.length) * 18 +
+        metaHeight +
+        descriptionLines.length * 17 +
+        progressHeight +
+        subtaskHeight +
+        4,
+    };
+  }
+
+  function drawManualTargetCard(context, card, x, y, width, bodyFont) {
+    let cursor = y;
+    context.font = "800 15px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillStyle = card.done ? "#7c847a" : "#20231f";
+    (card.headingLines?.length ? card.headingLines : [card.heading || ""]).forEach((line) => {
+      if (line) context.fillText(line, x, cursor);
+      if (card.done) {
+        const lineWidth = context.measureText(line).width;
+        context.strokeStyle = "#7c847a";
+        context.lineWidth = 1.2;
+        context.beginPath();
+        context.moveTo(x, cursor - 5);
+        context.lineTo(x + lineWidth, cursor - 5);
+        context.stroke();
+      }
+      cursor += 18;
+    });
+    drawManualPill(context, card.tag || "未分类", x + width - 68, y - 14, 68, card.accent || colors[0]);
+    if (card.hasProgress) drawManualTargetPercent(context, card.progress || { percent: 0 }, x + width - 68, y + 12, 68, card.accent || colors[0]);
+    context.font = bodyFont;
+    context.fillStyle = cssVarColor("--accent-2", "#4f8f66");
+    context.fillText(card.age || "", x, cursor + 2);
+    context.fillStyle = cssVarColor("--accent", "#2f6f73");
+    context.fillText(card.spent || "", x, cursor + 20);
+    cursor += 38;
+    if (card.descriptionLines?.length) {
+      context.fillStyle = "#687068";
+      card.descriptionLines.forEach((line) => {
+        context.fillText(line, x, cursor);
+        cursor += 17;
+      });
+    }
+    if (card.hasProgress) {
+      drawManualProgressBar(context, card.progress || { percent: 0 }, x, cursor - 4, width);
+      cursor += 20;
+    }
+    (card.subtasks || []).forEach((row) => {
+      if (!row.nameLines?.length && !row.descriptionLines?.length && !row.completedAt) return;
+      const indent = Math.max(0, row.level - 2) * 16;
+      const rowX = x + indent;
+      context.fillStyle = row.done ? "#8a9288" : "#40463f";
+      context.font = bodyFont;
+      (row.nameLines.length ? row.nameLines : [""]).forEach((line) => {
+        if (line) context.fillText(line, rowX, cursor);
+        if (row.done && line) {
+          const lineWidth = context.measureText(line).width;
+          context.strokeStyle = "#8a9288";
+          context.lineWidth = 1;
+          context.beginPath();
+          context.moveTo(rowX, cursor - 5);
+          context.lineTo(rowX + lineWidth, cursor - 5);
+          context.stroke();
+        }
+        cursor += 17;
+      });
+      if (row.completedAt) {
+        context.fillStyle = cssVarColor("--accent", "#2f6f73");
+        context.fillText(`${shortDateText(row.completedAt)}完成`, rowX, cursor);
+        cursor += 16;
+      }
+      if (row.descriptionLines.length) {
+        context.fillStyle = "#687068";
+        row.descriptionLines.forEach((line) => {
+          context.fillText(line, rowX, cursor);
+          cursor += 16;
+        });
+      }
+      cursor += 7;
+    });
+  }
+
+  function drawManualPill(context, text, x, y, width, color) {
+    context.save();
+    context.globalAlpha = 0.13;
+    context.fillStyle = color;
+    roundRectPath(context, x, y, width, 22, 11);
+    context.fill();
+    context.globalAlpha = 1;
+    context.fillStyle = color;
+    context.font = "800 11px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    const label = String(text || "").slice(0, 6);
+    const labelWidth = context.measureText(label).width;
+    context.fillText(label, x + Math.max(6, (width - labelWidth) / 2), y + 15);
+    context.restore();
+  }
+
+  function drawManualTargetPercent(context, progress, x, y, width, color) {
+    const percent = clamp(Number(progress.percent) || 0, 0, 100);
+    context.save();
+    context.fillStyle = color;
+    context.font = "800 11px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    const text = `${percent}%`;
+    const textWidth = context.measureText(text).width;
+    context.fillText(text, x + Math.max(0, (width - textWidth) / 2), y + 12);
+    context.restore();
+  }
+
+  function drawManualProgressBar(context, progress, x, y, width) {
+    const height = 13;
+    const percent = clamp(Number(progress.percent) || 0, 0, 100);
+    context.fillStyle = "#dceadf";
+    roundRectPath(context, x, y, width, height, 7);
+    context.fill();
+    context.save();
+    roundRectPath(context, x, y, width, height, 7);
+    context.clip();
+    context.fillStyle = cssVarColor("--accent", "#2f6f73");
+    context.fillRect(x, y, (width * percent) / 100, height);
+    context.restore();
+    context.strokeStyle = "#c8d9ca";
+    context.lineWidth = 1;
+    roundRectPath(context, x, y, width, height, 7);
+    context.stroke();
+  }
+
+  function drawManualCheckbox(context, x, y, checked, color) {
+    context.strokeStyle = checked ? color : "#cfd7cc";
+    context.fillStyle = checked ? color : "#fbfcfa";
+    context.lineWidth = 1.4;
+    roundRectPath(context, x, y, 14, 14, 3);
+    context.fill();
+    context.stroke();
+    if (!checked) return;
+    context.strokeStyle = "#ffffff";
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(x + 3, y + 7);
+    context.lineTo(x + 6, y + 10);
+    context.lineTo(x + 11, y + 4);
+    context.stroke();
+  }
+
+  function drawManualBreakdownBar(context, entries, x, y, width) {
+    const height = 18;
+    context.save();
+    roundRectPath(context, x, y, width, height, 9);
+    context.clip();
+    context.fillStyle = "#eef3ea";
+    context.fillRect(x, y, width, height);
+    let currentX = x;
+    entries.forEach((entry, index) => {
+      const percent = clamp(Number(entry.percent) || 0, 0, 100);
+      const segmentWidth = percent > 0 ? Math.max(2, (width * percent) / 100) : 0;
+      context.fillStyle = entry.color || colors[index % colors.length];
+      context.fillRect(currentX, y, segmentWidth, height);
+      currentX += segmentWidth;
+    });
+    context.restore();
+    context.strokeStyle = "#dfe4dc";
+    context.lineWidth = 1;
+    roundRectPath(context, x, y, width, height, 9);
+    context.stroke();
+  }
+
+  function drawManualBreakdownLegend(context, entries, x, y, width, font, measure) {
+    context.font = font;
+    let lineY = y;
+    entries.forEach((entry, index) => {
+      const text = `${entry.label} ${entry.percent}%${entry.valueText ? ` · ${entry.valueText}` : ""}`;
+      const lines = wrapCanvasText(measure, text, width - 18);
+      context.fillStyle = entry.color || colors[index % colors.length];
+      context.beginPath();
+      context.arc(x + 5, lineY - 4, 4, 0, Math.PI * 2);
+      context.fill();
+      context.fillStyle = "#40463f";
+      (lines.length ? lines : [""]).forEach((line, lineIndex) => {
+        context.fillText(line, x + 16, lineY + lineIndex * 18);
+      });
+      lineY += Math.max(1, lines.length) * 18;
+    });
+    return lineY;
   }
 
   function wrapCanvasText(context, text, maxWidth) {
@@ -2959,21 +3578,11 @@
   }
 
   function currentCanvasForExportItem(item) {
-    const selector = {
-      "record-summary": ".today-summary canvas",
-      "execute-habits": ".habit-section canvas",
-      "review-week": '[data-review-scope="week"] canvas',
-      "review-month": '[data-review-scope="month"] canvas',
-    }[item];
-    return selector ? $(selector) : null;
+    return null;
   }
 
   function currentSvgForExportItem(item) {
-    const selector = {
-      "record-summary": ".today-summary .record-trend-chart",
-    }[item];
-    const node = selector ? $(selector) : null;
-    return node instanceof SVGSVGElement ? node : null;
+    return null;
   }
 
   function makeChartExportCanvas(title, meta, sourceCanvas) {
@@ -3256,6 +3865,7 @@
     } else if (item === "record-location") {
       appendClone(app.querySelector(".location-panel"));
     } else if (item === "record-summary") {
+      appendClone(app.querySelector(".record-location-summary"));
       appendClone(app.querySelector(".today-summary"));
     } else if (item === "execute-targets") {
       appendClone(app.querySelector(".target-filter-band"));
@@ -3269,13 +3879,9 @@
     } else if (item === "review-month") {
       appendClone(app.querySelector('[data-review-scope="month"]'));
     } else if (item === "review-month-red" || item === "review-month-green") {
-      const previousMode = ui.monthReviewMode;
-      try {
-        ui.monthReviewMode = item === "review-month-green" ? "green" : "red";
-        appendHtml(renderMonthlyReviewSection());
-      } finally {
-        ui.monthReviewMode = previousMode;
-      }
+      appendHtml(renderMonthLightExport(item === "review-month-green" ? "green" : "red"));
+    } else if (item === "review-month-summary") {
+      appendHtml(renderMonthSummaryExport());
     }
 
     if (!fragment.children.length) return null;
@@ -3296,13 +3902,21 @@
     cloneCanvases.forEach((canvas, index) => {
       const source = sourceCanvases[index];
       if (!(source instanceof HTMLCanvasElement)) return;
-      const image = document.createElement("img");
-      image.src = source.toDataURL("image/png");
-      image.width = source.clientWidth || source.width;
-      image.height = source.clientHeight || source.height;
-      image.alt = canvas.getAttribute("aria-label") || "";
-      image.className = canvas.className;
-      canvas.replaceWith(image);
+      try {
+        const image = document.createElement("img");
+        image.src = source.toDataURL("image/png");
+        image.width = source.clientWidth || source.width;
+        image.height = source.clientHeight || source.height;
+        image.alt = canvas.getAttribute("aria-label") || "";
+        image.className = canvas.className;
+        canvas.replaceWith(image);
+      } catch (error) {
+        console.warn("Canvas clone failed; using export placeholder.", error);
+        const placeholder = document.createElement("div");
+        placeholder.className = "export-canvas-fallback";
+        placeholder.textContent = canvas.getAttribute("aria-label") || "图表暂无法读取";
+        canvas.replaceWith(placeholder);
+      }
     });
     return clone;
   }
@@ -3316,7 +3930,7 @@
     $$(".empty", fragment).forEach((node) => node.remove());
     if (item === "record-logs") {
       $$(".segment-panel", fragment).forEach((panel) => {
-        if (!panel.querySelector(".entry")) panel.remove();
+        if (!panel.querySelector(".entry") && !isExportableEmptyLocationPanel(panel)) panel.remove();
       });
     }
     if (item === "record-location") {
@@ -3329,6 +3943,9 @@
         if (!group.querySelector(".task-group")) group.remove();
       });
     }
+    if (item === "review-month") {
+      $$(".month-review-tabs, .monthly-light-list, .monthly-insight-card, .monthly-summary-stack", fragment).forEach((node) => node.remove());
+    }
     $$(".review-text", fragment).forEach((node) => {
       if (/^还没有/.test(node.textContent.trim())) node.remove();
     });
@@ -3339,6 +3956,12 @@
       if (node.querySelector("textarea, .review-text, .monthly-stats-table, .weekly-stacked-bar, .entry, .task-group, .habit-panel, .monthly-light-item, .monthly-key-event")) return;
       node.remove();
     });
+  }
+
+  function isExportableEmptyLocationPanel(panel) {
+    const type = panel.dataset.locationType || "";
+    const start = panel.dataset.locationStart || "";
+    return panel.classList.contains("location-record-block") && Boolean(start) && type && type !== DEFAULT_LOCATION_ID;
   }
 
   function replaceExportNavigators(fragment) {
@@ -3378,12 +4001,14 @@
 
   function renderRecordLogsExport() {
     const logs = state.logs[dateKey()] || [];
-    const blocks = recordTimelineBlocks(logs, { includeDrafts: false }).filter((block) => block.logs.length);
+    const blocks = recordTimelineBlocks(logs, { includeDrafts: false }).filter((block) =>
+      shouldRenderRecordTimelineBlock(block, { requireLogs: true, includeEmptyNonOutdoor: true }),
+    );
     if (!blocks.length) return "";
     return `
       <section class="section-band export-block">
         <div class="section-title"><div><div class="title-with-date"><h2>今日时间追踪</h2><span>${dateKey()} ${weekdayText(dateKey())}</span></div></div></div>
-        ${renderRecordTimeline(logs, { includeDrafts: false, requireLogs: true })}
+        ${renderRecordTimeline(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true })}
       </section>
     `;
   }
@@ -3412,7 +4037,7 @@
 
   function renderRecordSummaryExport() {
     if (!hasExportData("record-summary")) return "";
-    return renderRecordSummaries();
+    return `${renderRecordLocationSummary()}${renderRecordLearningSummarySection()}`;
   }
 
   function renderTargetsExport() {
@@ -3581,6 +4206,19 @@
     `;
   }
 
+  function renderMonthSummaryExport() {
+    const date = reviewDate("month");
+    const key = scopeKey("month", date);
+    const review = monthlyReviewForKey(key);
+    return `
+      <section class="section-band review-scope-section monthly-review-section export-block" data-review-scope="month">
+        ${renderReviewNavigator("month")}
+        <div class="section-title"><div><h2>月总结</h2><p class="hint">${scopeDisplay("month", date)}</p></div></div>
+        ${renderMonthlySummaryPanel(review, key, date)}
+      </section>
+    `;
+  }
+
   async function renderNodeToCanvas(node, width, height) {
     const cssText = collectExportCss();
     const serializedNode = new XMLSerializer().serializeToString(node);
@@ -3618,15 +4256,16 @@
   }
 
   async function renderNodeToPng(node, width, height) {
-    const canvas = await renderNodeToCanvas(node, width, height);
+    const canvas = assertExportCanvasReadable(await renderNodeToCanvas(node, width, height), "导出 PNG");
     const dataUrl = canvas.toDataURL("image/png");
     if (!dataUrl.startsWith("data:image/png")) throw new Error("导出 PNG 生成失败。");
     return dataUrl;
   }
 
-  function canvasToBlob(canvas) {
+  function canvasToBlob(canvas, label = "导出图片") {
+    const readableCanvas = assertExportCanvasReadable(canvas, label);
     return new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => {
+      readableCanvas.toBlob((blob) => {
         if (blob) resolve(blob);
         else reject(new Error("图片生成失败：浏览器没有返回 PNG 数据。"));
       }, "image/png");
@@ -3732,6 +4371,7 @@
       .review-export-sheet .toggle-button,
       .review-export-sheet .date-arrow,
       .review-export-sheet .date-calendar-button,
+      .review-export-sheet .record-chart-controls,
       .review-export-sheet .axis-add-time,
       .review-export-sheet .location-assign-select {
         display: none !important;
@@ -3754,6 +4394,30 @@
       }
       .review-export-sheet .export-date-line {
         margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .review-export-sheet .weekly-stacked-bar {
+        display: flex !important;
+        width: 100% !important;
+        min-height: 18px;
+        height: 18px;
+        overflow: hidden;
+      }
+      .review-export-sheet .weekly-stacked-bar span {
+        display: block !important;
+        flex: 0 0 auto !important;
+        height: 100% !important;
+        min-width: 2px;
+      }
+      .review-export-sheet .export-canvas-fallback {
+        min-height: 120px;
+        display: grid;
+        place-items: center;
+        border: 1px dashed rgba(47, 111, 115, 0.24);
+        border-radius: 8px;
+        background: rgba(47, 111, 115, 0.06);
         color: var(--muted);
         font-size: 13px;
         font-weight: 800;
@@ -3803,6 +4467,7 @@
           "新增假期时间与期望学习/工位时长设置；假期不计算工位时长利用率，周复盘和月复盘会汇总显示假期信息。",
           "学习时间统计替代近七日汇总，图表支持左右滑动切换 7 日时间窗口，数值标签置顶并加背景描边，导出时同步使用当前窗口和当前勾选显示状态。",
           "新增地点时间占比统计，记录页、周复盘和月复盘都会按当前地点顺序展示地点占比；未分配地点事项可手动归属到现有地点段。",
+          "记录页地点时间占比移动到学习时间统计上方；记录汇总导出会同时包含地点占比和学习统计，今日时间记录导出会保留无事项的非户外地点段并显示具体时间段。",
           "学习时间统计图改为水杯样式：工位时长为空心水蓝柱，学习时长为水色填充，滚动、刷新和滑动图表会触发杯内水面晃动。",
           "学习填满工位或只有学习无工位时，学习柱显示为固定冰块状态；工位时间利用率改为绿色折线，非假期无工位按 0 连线、假期跳过。",
           "导出图片重做为渲染级长图导出，提供预览、复制图片和保存图片；学习时间统计使用当前已渲染 SVG 直绘，避免纯文字导出。",

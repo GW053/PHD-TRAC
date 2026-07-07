@@ -1607,6 +1607,9 @@ textarea:focus {
 }
 
 .weekly-stacked-bar span {
+  display: block;
+  flex: 0 0 auto;
+  height: 100%;
   min-width: 2px;
 }
 
@@ -2949,6 +2952,7 @@ button.review-star {
 .review-export-sheet .toggle-button,
 .review-export-sheet .date-arrow,
 .review-export-sheet .date-calendar-button,
+.review-export-sheet .record-chart-controls,
 .review-export-sheet .axis-add-time,
 .review-export-sheet .location-assign-select {
   display: none !important;

@@ -378,6 +378,7 @@ textarea:focus {
   --axis-width: 12px;
   --axis-label-gap: 11px;
   --axis-label-width: 40px;
+  --axis-start-gap: 13px;
 }
 
 .timeline-row {
@@ -596,6 +597,18 @@ textarea:focus {
   height: 26px;
   min-height: 26px;
   font-size: 13px;
+}
+
+.outdoor-description-export-panel {
+  min-height: 0;
+  padding: 2px 0 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.outdoor-description-export-panel .location-description-list {
+  margin-top: 0;
 }
 
 .legacy-location-block {
@@ -3460,6 +3473,7 @@ button.review-star {
     --axis-width: 11px;
     --axis-label-gap: 10px;
     --axis-label-width: 35px;
+    --axis-start-gap: 12px;
   }
 
   .timeline-row {

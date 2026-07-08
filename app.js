@@ -7,7 +7,7 @@
   const SLEEP_SOURCE_TABLE = "daily_record_sync";
   const SLEEP_STAT_KEY = "__sleep";
   const APP_VERSION = "v1.7";
-  const VERSION_UPDATED_AT = "2026-07-07";
+  const VERSION_UPDATED_AT = "2026-07-08";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
   const defaultLocationTypes = [
     { id: "outdoor", name: "户外", color: "#d8b74e" },
@@ -500,14 +500,42 @@
     if (!options.requireLogs) return true;
     const ids = block.ids || [block.id];
     const hasEntries = Boolean(block.logs?.length || block.drafts?.length);
-    if (hasEntries || locationDescriptionForIds(ids)) return true;
+    const hasDescription = Boolean(locationDescriptionForExportIds(ids));
+    if (options.excludeOutdoor && block.type === DEFAULT_LOCATION_ID) return hasEntries || hasDescription;
+    if (hasEntries || hasDescription) return true;
     return Boolean(options.includeEmptyNonOutdoor && block.type && block.type !== DEFAULT_LOCATION_ID && block.start);
+  }
+
+  function recordTimelineExportBlocks(logs, options = {}) {
+    const includeDrafts = options.includeDrafts !== false;
+    const range = recordAxisRange();
+    const draftLogs = includeDrafts ? [...ui.logDrafts.values()].filter((entry) => entry.date === dateKey()) : [];
+    const baseBlocks = recordTimelineBlocks(logs, options);
+    const blockByAxisKey = new Map(
+      baseBlocks
+        .filter((block) => !block.legacy)
+        .map((block) => [locationAxisKey(block.ids || [block.id]), block]),
+    );
+    const sliceBlocks = locationSlicesForRange(range.start, range.end)
+      .map((slice) => {
+        const key = locationAxisKey(slice.ids || []);
+        return blockByAxisKey.get(key) || timelineBlockFromSlice(slice, logs, draftLogs);
+      })
+      .filter(Boolean);
+    const blocks = [...sliceBlocks, ...baseBlocks.filter((block) => block.legacy)];
+    const seen = new Set();
+    return blocks.filter((block) => {
+      const key = `${block.legacy ? "legacy" : "slice"}:${locationAxisKey(block.ids || [block.id])}:${block.start || ""}:${block.end || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return shouldRenderRecordTimelineBlock(block, options);
+    });
   }
 
   function renderTimelineRow(slice, index, count, rangeStart, total, block = null) {
     const minutes = slice.end - slice.start;
     const rowMin = Math.max(34, Math.round((minutes / total) * 220));
-    const topGap = index > 0 ? "var(--axis-label-gap)" : "0px";
+    const topGap = index > 0 ? "var(--axis-label-gap)" : "var(--axis-start-gap, 0px)";
     const bottomGap = index < count - 1 ? "var(--axis-label-gap)" : "0px";
     return `
       <div class="timeline-row" style="--row-min:${rowMin}px;--row-top-gap:${topGap};--row-bottom-gap:${bottomGap}">
@@ -543,7 +571,7 @@
   }
 
   function renderAxisSlice(slice, index, count) {
-    const beforeGap = index > 0 ? "var(--axis-label-gap)" : "0px";
+    const beforeGap = index > 0 ? "var(--axis-label-gap)" : "var(--axis-start-gap, 0px)";
     const afterGap = index < count - 1 ? "var(--axis-label-gap)" : "0px";
     return `
       <button
@@ -781,6 +809,12 @@
   function locationDescriptionForIds(ids = [], date = dateKey()) {
     const descriptions = state.locationDescriptions?.[date] || {};
     return ids.map((id) => descriptions[id]).filter(Boolean).join("\n");
+  }
+
+  function locationDescriptionForExportIds(ids = [], date = dateKey()) {
+    const noteKey = locationAxisKey(ids);
+    const draft = ui.locationDescriptionDrafts.has(noteKey) ? ui.locationDescriptionDrafts.get(noteKey) : "";
+    return Array.from(new Set([locationDescriptionForIds(ids, date), draft].map(normalizeLocationDescription).filter(Boolean))).join("\n");
   }
 
   function locationDescriptionLines(value) {
@@ -1059,10 +1093,10 @@
   }
 
   function renderRecordLocationSummary() {
-    const dates = recentRecordChartDates();
+    const dates = [dateKey()];
     return `
       <section class="section-band record-location-summary">
-        ${renderLocationBreakdownCard(locationBreakdownForDates(dates), "地点时间占比", "所选范围还没有地点时间。")}
+        ${renderLocationBreakdownCard(locationBreakdownForDates(dates), "地点时间占比", "今日还没有地点时间。")}
       </section>
     `;
   }
@@ -1106,6 +1140,10 @@
   function recordChartRangeText() {
     const dates = recentRecordChartDates();
     return `${dates[0]} 至 ${dates[dates.length - 1]}`;
+  }
+
+  function recordSummaryExportMeta() {
+    return `地点 ${dateKey()} / 学习 ${recordChartRangeText()}`;
   }
 
   function weekKeys(offset = ui.recordChartWindowOffset || 0) {
@@ -2474,7 +2512,7 @@
         "记录",
         [
           ["record-logs", "今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`],
-          ["record-summary", "地点与学习统计", recordChartRangeText()],
+          ["record-summary", "地点与学习统计", recordSummaryExportMeta()],
         ],
       ],
     ];
@@ -2499,7 +2537,7 @@
 
   function exportItemMeta(item, scope = state.activeTab) {
     if (item === "record-logs") return `${dateKey()} ${weekdayText(dateKey())}`;
-    if (item === "record-summary") return recordChartRangeText();
+    if (item === "record-summary") return recordSummaryExportMeta();
     if (item === "execute-targets") return scopeDisplay("day", dateKey());
     if (item === "execute-habits") return habitTrailRangeText();
     if (item === "review-day") return scopeDisplay("day", reviewDate("day"));
@@ -2555,15 +2593,13 @@
     const logs = state.logs[day] || [];
     if (logs.some((entry) => Number(entry.minutes) > 0 || entry.note || entry.targetId)) return true;
     if (day !== dateKey()) return false;
-    return recordTimelineBlocks(logs, { includeDrafts: false }).some((block) =>
-      shouldRenderRecordTimelineBlock(block, { requireLogs: true, includeEmptyNonOutdoor: true }),
-    );
+    return recordTimelineExportBlocks(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true, excludeOutdoor: true }).length > 0;
   }
 
   function hasRecordSummaryExportData() {
     const dates = recentRecordChartDates();
     return (
-      locationBreakdownForDates(dates).total > 0 ||
+      locationBreakdownForDates([dateKey()]).total > 0 ||
       dates.some((itemDate) => studySummaryForDates([itemDate]).total > 0 || workSummaryForDates([itemDate]).total > 0) ||
       habitRateForDates(dates) > 0
     );
@@ -2658,6 +2694,7 @@
   }
 
   async function createExportItemCanvas(item, scope = state.activeTab) {
+    if (item === "record-summary") return await makeRecordSummaryExportCanvas(scope);
     const sourceCanvas = currentCanvasForExportItem(item);
     if (sourceCanvas) return assertExportCanvasReadable(makeChartExportCanvas(exportItemName(item), exportItemMeta(item, scope), sourceCanvas), exportItemName(item));
     const sourceSvg = currentSvgForExportItem(item);
@@ -2698,6 +2735,353 @@
       }
     }
     throw new Error(`${exportItemName(item)}导出失败：${originalError?.message || "浏览器限制渲染"}`);
+  }
+
+  async function makeRecordSummaryExportCanvas(scope = state.activeTab) {
+    if (!hasExportData("record-summary")) return null;
+    const canvases = [];
+    const locationCanvas = await makeRecordSummaryLocationCanvas();
+    if (locationCanvas) canvases.push(locationCanvas);
+    const chartCanvas = await makeRecordSummaryChartCanvas(scope);
+    if (chartCanvas) canvases.push(chartCanvas);
+    const habitCanvas = makeRecordSummaryHabitCanvas();
+    if (habitCanvas) canvases.push(habitCanvas);
+    if (canvases.length) return assertExportCanvasReadable(combineExportCanvases(canvases), exportItemName("record-summary"));
+    return makeManualRecordSummaryCanvas();
+  }
+
+  async function makeRecordSummaryLocationCanvas() {
+    const source = $(".record-location-summary");
+    if (!source) return makeRecordLocationBreakdownCanvas();
+    try {
+      return await renderExportElementCanvas(source, "record-summary");
+    } catch (error) {
+      console.warn("Record location summary export failed; using manual card.", error);
+      return makeRecordLocationBreakdownCanvas();
+    }
+  }
+
+  async function makeRecordSummaryChartCanvas(scope = state.activeTab) {
+    const sourceSvg = $(".today-summary .record-trend-chart");
+    if (!(sourceSvg instanceof SVGSVGElement)) return makeRecordSummaryChartFallbackCanvas();
+    try {
+      return assertExportCanvasReadable(await makeSvgChartExportCanvas("学习时间统计", recordChartRangeText(), sourceSvg), "学习时间统计");
+    } catch (error) {
+      console.warn("Record chart SVG export failed; using chart fallback.", error);
+      return makeRecordSummaryChartFallbackCanvas();
+    }
+  }
+
+  function makeRecordSummaryHabitCanvas() {
+    const rate = habitRateForDates(recentRecordChartDates());
+    if (!(rate > 0)) return null;
+    return makeManualCardsCanvas("习惯平均达标率", recordChartRangeText(), [
+      {
+        heading: "习惯平均达标率",
+        lines: [`${rate}%`],
+        accent: cssVarColor("--accent-2", colors[1]),
+      },
+    ]);
+  }
+
+  function makeRecordLocationBreakdownCanvas() {
+    const cards = [];
+    appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates([dateKey()]));
+    return makeManualCardsCanvas("地点时间占比", dateKey(), cards);
+  }
+
+  function makeRecordSummaryChartFallbackCanvas() {
+    const dates = recentRecordChartDates();
+    const data = recordChartData(dates);
+    const expected = expectedHourTargets();
+    const hasVisibleData = data.some((item) => item.study > 0 || (item.work !== null && item.work > 0) || (item.efficiency !== null && item.efficiency > 0));
+    const hasExpectedData = expected.study > 0 || expected.work > 0;
+    if (!data.length || (!hasVisibleData && !hasExpectedData)) return null;
+
+    const scale = exportScale();
+    const cssWidth = exportCanvasCssWidth();
+    const padding = 14;
+    const titleHeight = 48;
+    const sourceWidth = 520;
+    const sourceHeight = 310;
+    const chartWidth = cssWidth - padding * 2;
+    const chartHeight = Math.max(180, Math.round(chartWidth * (sourceHeight / sourceWidth)));
+    const legendItems = recordSummaryChartLegendItems(expected);
+    const legendRows = Math.ceil(legendItems.length / 2);
+    const legendHeight = legendRows * 20 + 10;
+    const totalHeight = padding * 2 + titleHeight + chartHeight + legendHeight;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(cssWidth * scale);
+    canvas.height = Math.ceil(totalHeight * scale);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法创建学习时间统计导出画布。");
+    context.scale(scale, scale);
+    drawExportBackground(context, cssWidth, totalHeight);
+    context.fillStyle = "#ffffff";
+    roundRectPath(context, padding, padding, chartWidth, titleHeight + chartHeight + legendHeight, 8);
+    context.fill();
+    context.fillStyle = "#20231f";
+    context.font = "800 18px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText("学习时间统计", padding + 12, padding + 24);
+    context.fillStyle = "#687068";
+    context.font = "700 12px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.fillText(recordChartRangeText(), padding + 12, padding + 42);
+    context.save();
+    context.translate(padding, padding + titleHeight);
+    context.scale(chartWidth / sourceWidth, chartHeight / sourceHeight);
+    drawRecordSummaryFallbackChart(context, data, expected, ui.recordChartSeries || {});
+    context.restore();
+    drawChartLegendForExport(context, legendItems, padding + 12, padding + titleHeight + chartHeight + 4, chartWidth - 24);
+    return canvas;
+  }
+
+  function recordSummaryChartLegendItems(expected) {
+    const workColor = "#39bff2";
+    const studyColor = getStudyTag()?.color || "#2f6f73";
+    return [
+      { label: "工位时长", color: workColor, hollow: true },
+      { label: "学习填充", color: workColor },
+      { label: "工位时间利用率", color: "#3fa66b", line: true },
+      expected.work > 0 ? { label: "期望工位", color: workColor, dash: true } : null,
+      expected.study > 0 ? { label: "期望学习", color: studyColor, dash: true } : null,
+    ].filter(Boolean);
+  }
+
+  function drawRecordSummaryFallbackChart(context, data, expected, labels) {
+    const width = 520;
+    const height = 310;
+    const margin = { top: 34, right: 44, bottom: 52, left: 42 };
+    const chartWidth = width - margin.left - margin.right;
+    const chartHeight = height - margin.top - margin.bottom;
+    const visibleHourValues = data.flatMap((item) => [item.work ?? 0, item.study, expected.study, expected.work]);
+    const maxHour = Math.max(1, Math.ceil(Math.max(...visibleHourValues) * 1.22));
+    const step = chartWidth / data.length;
+    const groupWidth = Math.min(28, Math.max(18, step * 0.46));
+    const studyWidth = groupWidth;
+    const yHour = (value) => margin.top + chartHeight - (value / maxHour) * chartHeight;
+    const yPercent = (value) => margin.top + chartHeight - (clamp(value, 0, 100) / 100) * chartHeight;
+    const xCenter = (index) => margin.left + step * index + step / 2;
+    const workColor = "#39bff2";
+    const studyColor = workColor;
+    const expectedLines = [
+      expected.work > 0 ? { value: expected.work, color: workColor, label: `期望 ${formatChartHourValue(expected.work)}` } : null,
+      expected.study > 0 ? { value: expected.study, color: getStudyTag()?.color || "#2f6f73", label: `期望 ${formatChartHourValue(expected.study)}` } : null,
+    ].filter(Boolean);
+
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.font = "780 13px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.textBaseline = "alphabetic";
+    context.strokeStyle = "#9aa79b";
+    context.lineWidth = 1;
+    drawCanvasLine(context, margin.left, margin.top, margin.left, margin.top + chartHeight);
+    drawCanvasLine(context, margin.left, margin.top + chartHeight, margin.left + chartWidth, margin.top + chartHeight);
+    drawCanvasLine(context, margin.left + chartWidth, margin.top, margin.left + chartWidth, margin.top + chartHeight);
+
+    context.fillStyle = "#687068";
+    context.textAlign = "left";
+    context.fillText("h", margin.left - 28, margin.top - 8);
+    context.fillText("%", margin.left + chartWidth + 24, margin.top - 8);
+    [0, maxHour / 2, maxHour].forEach((tick) => {
+      const y = yHour(tick);
+      context.strokeStyle = "rgba(154,167,155,.28)";
+      drawCanvasLine(context, margin.left, y, margin.left + chartWidth, y);
+      context.fillStyle = "#687068";
+      context.textAlign = "right";
+      context.fillText(formatChartHourTick(tick), margin.left - 8, y + 4);
+    });
+    [0, 50, 100].forEach((tick) => {
+      const y = yPercent(tick);
+      context.fillStyle = "#687068";
+      context.textAlign = "left";
+      context.fillText(`${tick}%`, margin.left + chartWidth + 8, y + 4);
+    });
+
+    expectedLines.forEach((line) => {
+      const y = yHour(line.value);
+      context.strokeStyle = line.color;
+      context.globalAlpha = 0.86;
+      context.lineWidth = 2;
+      context.setLineDash([7, 6]);
+      drawCanvasLine(context, margin.left, y, margin.left + chartWidth, y);
+      context.setLineDash([]);
+      context.globalAlpha = 1;
+    });
+
+    data.forEach((item, index) => {
+      drawRecordSummaryFallbackColumn(context, item, index, { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, studyColor, workColor });
+    });
+
+    const efficiencyPoints = data
+      .map((item, index) => (item.efficiency === null ? null : { x: xCenter(index), y: yPercent(item.efficiency), value: item.efficiency }))
+      .filter(Boolean);
+    if (efficiencyPoints.length) {
+      context.strokeStyle = "#3fa66b";
+      context.lineWidth = 3;
+      context.beginPath();
+      efficiencyPoints.forEach((point, index) => {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      });
+      context.stroke();
+      efficiencyPoints.forEach((point) => {
+        context.fillStyle = "#3fa66b";
+        context.strokeStyle = "#ffffff";
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.arc(point.x, point.y, 4.2, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+      });
+    }
+
+    const labelEvery = Math.max(1, Math.ceil(data.length / 8));
+    data.forEach((item, index) => {
+      if (index !== 0 && index !== data.length - 1 && index % labelEvery !== 0) return;
+      drawRecordChartCanvasText(context, item.label, xCenter(index), height - 20, { align: "center", color: "#687068", stroke: false });
+    });
+
+    expectedLines.forEach((line) => {
+      const y = yHour(line.value);
+      drawRecordChartCanvasText(context, line.label, margin.left + chartWidth - 4, Math.max(margin.top + 14, y - 7), { align: "right", color: line.color });
+    });
+    data.forEach((item, index) => {
+      drawRecordSummaryFallbackLabels(context, item, index, { margin, groupWidth, studyWidth, yHour, xCenter, labels });
+    });
+    if (labels.efficiency) {
+      efficiencyPoints.forEach((point) => {
+        drawRecordChartCanvasText(context, `${point.value}%`, point.x + 8, Math.max(margin.top + 12, point.y + 4), { align: "left", color: "#2f8f5b" });
+      });
+    }
+    context.restore();
+  }
+
+  function drawRecordSummaryFallbackColumn(context, item, index, config) {
+    const { margin, chartHeight, groupWidth, studyWidth, yHour, xCenter, studyColor, workColor } = config;
+    const center = xCenter(index);
+    const baseline = margin.top + chartHeight;
+    const workValue = item.work;
+    const studyValue = item.study;
+    if (studyValue > 0) {
+      const hasWorkCup = workValue !== null && workValue > 0;
+      const cupValue = hasWorkCup ? workValue : studyValue;
+      const fillValue = hasWorkCup ? Math.min(studyValue, workValue) : studyValue;
+      const cupY = yHour(cupValue);
+      const fillY = yHour(fillValue);
+      const cupHeight = Math.max(2, baseline - cupY);
+      const x = center - studyWidth / 2;
+      const frozen = !hasWorkCup || studyValue >= workValue;
+      context.save();
+      context.beginPath();
+      context.rect(x + 1, cupY + 1, Math.max(1, studyWidth - 2), Math.max(1, cupHeight - 1));
+      context.clip();
+      if (frozen) {
+        context.fillStyle = "rgba(198,239,253,.86)";
+        context.fillRect(x, cupY, studyWidth, cupHeight);
+        context.strokeStyle = "rgba(59,177,222,.72)";
+        context.lineWidth = 1;
+        context.strokeRect(x, cupY, studyWidth, cupHeight);
+      } else {
+        context.globalAlpha = 0.72;
+        context.fillStyle = studyColor;
+        drawCanvasWaterFill(context, x, fillY, studyWidth, baseline);
+      }
+      context.restore();
+    }
+    if (workValue !== null && workValue > 0) {
+      const y = yHour(workValue);
+      const height = Math.max(2, baseline - y);
+      const x = center - groupWidth / 2;
+      context.fillStyle = "rgba(57,191,242,.07)";
+      context.fillRect(x, y, groupWidth, height);
+      context.strokeStyle = workColor;
+      context.lineWidth = 2;
+      context.strokeRect(x, y, groupWidth, height);
+    }
+  }
+
+  function drawCanvasWaterFill(context, x, y, width, baseline) {
+    const height = Math.max(2, baseline - y);
+    const inset = Math.min(2.4, width * 0.12, height * 0.2);
+    const centerDrop = Math.min(1.5, inset * 0.72);
+    const middleY = y + inset;
+    const right = x + width;
+    context.beginPath();
+    context.moveTo(x, baseline);
+    context.lineTo(x, y);
+    context.lineTo(x + inset, middleY);
+    context.quadraticCurveTo(x + width / 2, middleY + centerDrop, right - inset, middleY);
+    context.lineTo(right, y);
+    context.lineTo(right, baseline);
+    context.closePath();
+    context.fill();
+  }
+
+  function drawRecordSummaryFallbackLabels(context, item, index, config) {
+    const { margin, studyWidth, yHour, xCenter, labels } = config;
+    const center = xCenter(index);
+    const workValue = item.work;
+    const studyValue = item.study;
+    if (studyValue > 0 && labels.study) {
+      const hasWorkCup = workValue !== null && workValue > 0;
+      const cupValue = hasWorkCup ? workValue : studyValue;
+      const x = center - studyWidth / 2;
+      const labelY = hasWorkCup && studyValue >= workValue ? yHour(cupValue) : yHour(studyValue);
+      drawRecordChartCanvasText(context, formatChartHourValue(studyValue), x - 4, Math.max(margin.top + 12, labelY + 4), { align: "right", color: "#20231f" });
+    }
+    if (workValue !== null && workValue > 0 && labels.work) {
+      const y = yHour(workValue);
+      drawRecordChartCanvasText(context, formatChartHourValue(workValue), center, Math.max(margin.top + 12, y - 6), { align: "center", color: "#20231f" });
+    }
+  }
+
+  function drawRecordChartCanvasText(context, text, x, y, options = {}) {
+    context.save();
+    context.font = options.font || "780 13px system-ui, -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif";
+    context.textAlign = options.align || "center";
+    context.textBaseline = "alphabetic";
+    context.fillStyle = options.color || "#20231f";
+    if (options.stroke !== false) {
+      context.strokeStyle = "#fbfcfa";
+      context.lineWidth = 4;
+      context.lineJoin = "round";
+      context.strokeText(text, x, y);
+    }
+    context.fillText(text, x, y);
+    context.restore();
+  }
+
+  function drawCanvasLine(context, x1, y1, x2, y2) {
+    context.beginPath();
+    context.moveTo(x1, y1);
+    context.lineTo(x2, y2);
+    context.stroke();
+  }
+
+  async function renderExportElementCanvas(source, item) {
+    const exportNode = document.createElement("div");
+    exportNode.className = "review-export-sheet single-export-sheet";
+    exportNode.style.width = `${exportCanvasCssWidth()}px`;
+    const stack = document.createElement("div");
+    stack.className = "review-export-stack";
+    stack.appendChild(cloneNodeWithRenderedCanvases(source));
+    exportNode.appendChild(stack);
+    cleanExportClone(exportNode, item);
+    const measureHost = document.createElement("div");
+    measureHost.className = "review-export-measure";
+    measureHost.style.width = `${exportCanvasCssWidth()}px`;
+    measureHost.appendChild(exportNode);
+    document.body.appendChild(measureHost);
+    try {
+      if (document.fonts?.ready) await document.fonts.ready.catch(() => {});
+      const width = Math.ceil(exportNode.scrollWidth);
+      const height = Math.ceil(exportNode.scrollHeight);
+      if (!width || !height) return null;
+      return assertExportCanvasReadable(await renderNodeToCanvas(exportNode, width, height), exportItemName(item));
+    } finally {
+      measureHost.remove();
+    }
   }
 
   async function renderExportNodeInChunks(exportNode, item, originalError) {
@@ -2792,6 +3176,7 @@
     if (item === "execute-targets") return makeManualTargetsCanvas();
     if (item === "execute-habits") return makeManualHabitsCanvas();
     if (item === "record-logs") return makeManualRecordLogsCanvas();
+    if (item === "record-summary") return makeManualRecordSummaryCanvas();
     return null;
   }
 
@@ -3059,18 +3444,62 @@
 
   function makeManualRecordLogsCanvas() {
     const logs = state.logs[dateKey()] || [];
-    const cards = recordTimelineBlocks(logs, { includeDrafts: false })
-      .filter((block) => block.logs.length)
-      .map((block, index) => ({
-        heading: block.title,
-        lines: block.logs.map((log) => {
+    const cards = recordTimelineExportBlocks(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true, excludeOutdoor: true })
+      .map((block, index) => {
+        const isOutdoor = block.type === DEFAULT_LOCATION_ID;
+        const rawDescriptionLines = locationDescriptionLines(locationDescriptionForExportIds(block.ids || [block.id]));
+        const descriptionLines = rawDescriptionLines;
+        const logLines = block.logs.map((log) => {
           const tag = getTag(log.tagId);
           const target = targetNameForLogLink(log.targetId, dateKey());
           return [tag?.name || "未分类", formatDuration(log.minutes), log.note || "", target ? `目标：${target}` : ""].filter(Boolean).join(" · ");
-        }),
-        accent: locationColor(block.type) || colors[index % colors.length],
-      }));
+        });
+        if (isOutdoor && descriptionLines.length && !logLines.length) {
+          return {
+            type: "outdoor-description",
+            lines: descriptionLines,
+            accent: locationColor(block.type) || colors[index % colors.length],
+          };
+        }
+        const heading = block.type === DEFAULT_LOCATION_ID ? "" : [block.title, locationBlockTimeText(block)].filter(Boolean).join("  ");
+        return {
+          type: "location-log",
+          heading,
+          descriptionLines,
+          lines: logLines,
+          accent: locationColor(block.type) || colors[index % colors.length],
+        };
+      });
     return makeManualCardsCanvas("今日时间记录", `${dateKey()} ${weekdayText(dateKey())}`, cards);
+  }
+
+  function makeManualRecordSummaryCanvas() {
+    const dates = recentRecordChartDates();
+    const cards = [];
+    appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates([dateKey()]));
+    const chartLines = recordChartData(dates)
+      .filter((item) => item.study > 0 || (item.work !== null && item.work > 0) || (item.efficiency !== null && item.efficiency > 0))
+      .map((item) => {
+        const workText = item.work === null ? "假期" : formatHourShortText(item.work * 60);
+        const efficiencyText = item.efficiency === null ? "不计" : `${item.efficiency}%`;
+        return `${item.label} 学习${formatHourShortText(item.study * 60)} / 工位${workText} / 工位时间利用率${efficiencyText}`;
+      });
+    if (chartLines.length) {
+      cards.push({
+        heading: "学习时间统计",
+        lines: chartLines,
+        accent: cssVarColor("--accent", colors[0]),
+      });
+    }
+    const habitRate = habitRateForDates(dates);
+    if (habitRate > 0) {
+      cards.push({
+        heading: "习惯平均达标率",
+        lines: [`${habitRate}%`],
+        accent: cssVarColor("--accent-2", colors[1]),
+      });
+    }
+    return makeManualCardsCanvas("地点与学习统计", recordSummaryExportMeta(), cards);
   }
 
   function appendBreakdownManualCard(cards, heading, breakdown) {
@@ -3120,11 +3549,14 @@
       if (card.type === "day-review") return prepareManualDayReviewCard(card, measure, textWidth, cardPadding);
       if (card.type === "habit") return prepareManualHabitCard(card, measure, textWidth, cardPadding);
       if (card.type === "target") return prepareManualTargetCard(card, measure, textWidth, cardPadding);
+      if (card.type === "outdoor-description") return prepareManualOutdoorDescription(card, measure, textWidth);
       const entries = card.type === "breakdown" ? card.entries || [] : [];
+      const descriptionLines = (card.descriptionLines || []).flatMap((line) => wrapCanvasText(measure, line, textWidth - 16));
       const lines = (card.type === "breakdown" ? entries.map((entry) => `${entry.label} ${entry.percent}%${entry.valueText ? ` · ${entry.valueText}` : ""}`) : card.lines || [])
         .flatMap((line) => wrapCanvasText(measure, line, textWidth - (card.type === "breakdown" ? 18 : 0)));
       const extraHeight = card.type === "breakdown" ? 28 : 0;
-      return { ...card, wrappedLines: lines, height: cardPadding * 2 + 20 + extraHeight + Math.max(1, lines.length) * 18 };
+      const descriptionHeight = descriptionLines.length ? descriptionLines.length * 18 + (lines.length ? 4 : 0) : 0;
+      return { ...card, descriptionWrappedLines: descriptionLines, wrappedLines: lines, height: cardPadding * 2 + 20 + extraHeight + descriptionHeight + Math.max(1, lines.length) * 18 };
     });
     const totalHeight = padding * 2 + 44 + prepared.reduce((sum, card) => sum + card.height, 0) + gap * Math.max(0, prepared.length - 1);
     const canvas = document.createElement("canvas");
@@ -3142,6 +3574,11 @@
     context.fillText(meta || "", padding, padding + 38);
     let y = padding + 50;
     prepared.forEach((card) => {
+      if (card.type === "outdoor-description") {
+        drawManualOutdoorDescription(context, card, padding + cardPadding, y + 14, textWidth, bodyFont);
+        y += card.height + gap;
+        return;
+      }
       context.fillStyle = "#ffffff";
       roundRectPath(context, padding, y, contentWidth, card.height, 8);
       context.fill();
@@ -3166,6 +3603,10 @@
       } else if (card.type === "target") {
         drawManualTargetCard(context, card, padding + cardPadding, lineY, textWidth, bodyFont);
       } else {
+        if (card.descriptionWrappedLines?.length) {
+          lineY = drawManualLocationDescriptionLines(context, card, padding + cardPadding, lineY, textWidth, bodyFont);
+          if (card.wrappedLines.length) lineY += 4;
+        }
         (card.wrappedLines.length ? card.wrappedLines : [""]).forEach((line) => {
           context.fillText(line, padding + cardPadding, lineY);
           lineY += 18;
@@ -3174,6 +3615,47 @@
       y += card.height + gap;
     });
     return canvas;
+  }
+
+  function drawManualLocationDescriptionLines(context, card, x, y, width, bodyFont) {
+    context.font = bodyFont;
+    const lines = card.descriptionWrappedLines || [];
+    lines.forEach((line) => {
+      context.save();
+      context.globalAlpha = 0.72;
+      context.fillStyle = card.accent || colors[0];
+      context.beginPath();
+      context.arc(x + 3, y - 5, 2.6, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+      context.fillStyle = "#40463f";
+      context.fillText(line, x + 14, y);
+      y += 18;
+    });
+    return y;
+  }
+
+  function prepareManualOutdoorDescription(card, measure, textWidth) {
+    const lines = (card.lines || []).flatMap((line) => wrapCanvasText(measure, line, textWidth - 16));
+    return { ...card, wrappedLines: lines, height: Math.max(24, Math.max(1, lines.length) * 18 + 6) };
+  }
+
+  function drawManualOutdoorDescription(context, card, x, y, width, bodyFont) {
+    context.font = bodyFont;
+    context.fillStyle = "#64705f";
+    const lines = card.wrappedLines?.length ? card.wrappedLines : card.lines || [];
+    lines.forEach((line) => {
+      context.save();
+      context.globalAlpha = 0.58;
+      context.fillStyle = card.accent || locationColor(DEFAULT_LOCATION_ID);
+      context.beginPath();
+      context.arc(x + 3, y - 5, 2.6, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+      context.fillStyle = "#64705f";
+      context.fillText(line, x + 14, y);
+      y += 18;
+    });
   }
 
   function prepareManualDayReviewCard(card, measure, textWidth, cardPadding) {
@@ -3923,6 +4405,7 @@
 
   function cleanExportClone(fragment, item) {
     syncExportFormValues(fragment);
+    syncLocationDescriptionEditorsForExport(fragment);
     replaceExportNavigators(fragment);
     $$(".review-due-reminder", fragment).forEach((node) => node.remove());
     $$(".location-assign-select", fragment).forEach((node) => node.remove());
@@ -3930,7 +4413,12 @@
     $$(".empty", fragment).forEach((node) => node.remove());
     if (item === "record-logs") {
       $$(".segment-panel", fragment).forEach((panel) => {
-        if (!panel.querySelector(".entry") && !isExportableEmptyLocationPanel(panel)) panel.remove();
+        if (isEmptyOutdoorExportPanel(panel)) {
+          panel.remove();
+          return;
+        }
+        if (isOutdoorExportPanelWithContent(panel)) prepareOutdoorDescriptionExportPanel(panel);
+        if (!panel.querySelector(".entry") && !panel.querySelector(".location-description-line") && !isExportableEmptyLocationPanel(panel)) panel.remove();
       });
     }
     if (item === "record-location") {
@@ -3958,10 +4446,63 @@
     });
   }
 
+  function syncLocationDescriptionEditorsForExport(fragment) {
+    $$(".location-description-editor", fragment).forEach((editor) => {
+      const block = editor.closest(".location-record-block");
+      const textarea = editor.querySelector("textarea");
+      const ids = parseIdList(block?.dataset.locationIds || textarea?.dataset.locationNoteIds || "");
+      const noteKey = block?.dataset.locationNoteKey || textarea?.dataset.locationNoteKey || locationAxisKey(ids);
+      const value = ui.locationDescriptionDrafts.has(noteKey)
+        ? ui.locationDescriptionDrafts.get(noteKey)
+        : textarea?.value || textarea?.textContent || locationDescriptionForIds(ids);
+      const lines = locationDescriptionLines(value);
+      if (!lines.length) {
+        editor.remove();
+        return;
+      }
+      const color = block?.style.getPropertyValue("--location-color") || locationColor(block?.dataset.locationType || "");
+      const list = document.createElement("div");
+      list.className = "location-description-list";
+      lines.forEach((line) => {
+        const row = document.createElement("p");
+        row.className = "location-description-line";
+        const dot = document.createElement("i");
+        dot.style.background = color;
+        const text = document.createElement("span");
+        text.textContent = line;
+        row.append(dot, text);
+        list.appendChild(row);
+      });
+      editor.replaceWith(list);
+    });
+  }
+
   function isExportableEmptyLocationPanel(panel) {
     const type = panel.dataset.locationType || "";
     const start = panel.dataset.locationStart || "";
     return panel.classList.contains("location-record-block") && Boolean(start) && type && type !== DEFAULT_LOCATION_ID;
+  }
+
+  function isEmptyOutdoorExportPanel(panel) {
+    return (
+      panel.classList.contains("location-record-block") &&
+      panel.dataset.locationType === DEFAULT_LOCATION_ID &&
+      !panel.querySelector(".entry") &&
+      !panel.querySelector(".location-description-line")
+    );
+  }
+
+  function isOutdoorExportPanelWithContent(panel) {
+    return (
+      panel.classList.contains("location-record-block") &&
+      panel.dataset.locationType === DEFAULT_LOCATION_ID &&
+      Boolean(panel.querySelector(".entry, .location-description-line"))
+    );
+  }
+
+  function prepareOutdoorDescriptionExportPanel(panel) {
+    panel.querySelector(".segment-header")?.remove();
+    if (!panel.querySelector(".entry")) panel.classList.add("outdoor-description-export-panel");
   }
 
   function replaceExportNavigators(fragment) {
@@ -4001,14 +4542,11 @@
 
   function renderRecordLogsExport() {
     const logs = state.logs[dateKey()] || [];
-    const blocks = recordTimelineBlocks(logs, { includeDrafts: false }).filter((block) =>
-      shouldRenderRecordTimelineBlock(block, { requireLogs: true, includeEmptyNonOutdoor: true }),
-    );
-    if (!blocks.length) return "";
+    if (!recordTimelineExportBlocks(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true, excludeOutdoor: true }).length) return "";
     return `
       <section class="section-band export-block">
         <div class="section-title"><div><div class="title-with-date"><h2>今日时间追踪</h2><span>${dateKey()} ${weekdayText(dateKey())}</span></div></div></div>
-        ${renderRecordTimeline(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true })}
+        ${renderRecordTimeline(logs, { includeDrafts: false, requireLogs: true, includeEmptyNonOutdoor: true, excludeOutdoor: true })}
       </section>
     `;
   }
@@ -4460,14 +4998,16 @@
   function openVersionModal() {
     const versions = {
       "v1.7": {
-        updatedAt: "2026-07-07",
+        updatedAt: "2026-07-08",
         items: [
           "记录页时间逻辑改为左侧全天地点时间轴，支持空心未计入时段、添加地点时间、默认地点和地点颜色维护。",
           "地点记录框简化为空状态只显示地点名称和操作入口，支持地点描述、小圆点文本、事项记录和连续同地点时段合并。",
           "新增假期时间与期望学习/工位时长设置；假期不计算工位时长利用率，周复盘和月复盘会汇总显示假期信息。",
           "学习时间统计替代近七日汇总，图表支持左右滑动切换 7 日时间窗口，数值标签置顶并加背景描边，导出时同步使用当前窗口和当前勾选显示状态。",
           "新增地点时间占比统计，记录页、周复盘和月复盘都会按当前地点顺序展示地点占比；未分配地点事项可手动归属到现有地点段。",
-          "记录页地点时间占比移动到学习时间统计上方；记录汇总导出会同时包含地点占比和学习统计，今日时间记录导出会保留无事项的非户外地点段并显示具体时间段。",
+          "记录页地点时间占比移动到学习时间统计上方，并固定只统计当前记录日期；记录汇总导出会同时包含当日地点占比和学习统计，今日时间记录导出会保留无事项的非户外地点段并显示具体时间段。",
+          "修复记录汇总导出在浏览器限制下退成纯文字的问题，地点时间占比兜底导出也会保留横向占比条；优化时间轴顶部间距，避免 0 点标签和右侧地点框重叠。",
+          "今日时间记录导出会显示各非户外地点段的具体时间，并把地点描述一起导出；有描述的户外段会随描述保留，但导出时不显示“户外”标题。迁移目标被删除或在后续日期完成后，会记录忽略来源，避免自动同步反复重建。",
           "学习时间统计图改为水杯样式：工位时长为空心水蓝柱，学习时长为水色填充，滚动、刷新和滑动图表会触发杯内水面晃动。",
           "学习填满工位或只有学习无工位时，学习柱显示为固定冰块状态；工位时间利用率改为绿色折线，非假期无工位按 0 连线、假期跳过。",
           "导出图片重做为渲染级长图导出，提供预览、复制图片和保存图片；学习时间统计使用当前已渲染 SVG 直绘，避免纯文字导出。",
@@ -5338,6 +5878,7 @@
               if (existingTarget) {
                 const index = list.findIndex((item) => item.id === existingTarget.id);
                 list[index] = targetData;
+                if (isTaskDone(targetData)) markMigratedTargetIgnored(draft, targetData);
               } else {
                 list.push(targetData);
               }
@@ -6212,7 +6753,10 @@
     setState((draft) => {
       const list = targetsForScopeDraft(draft, state.targetScope, scopeKey(state.targetScope));
       const index = list.findIndex((item) => item.id === targetId);
-      if (index >= 0) list.splice(index, 1);
+      if (index >= 0) {
+        markMigratedTargetIgnored(draft, list[index]);
+        list.splice(index, 1);
+      }
     });
   }
 
@@ -6241,7 +6785,7 @@
     const targetDate = nextScopeDate("day", sourceDate);
     setState((draft) => {
       draft.targetMigrations ||= {};
-      draft.targetMigrations[sourceDate] = { targetDate };
+      draft.targetMigrations[sourceDate] = { ...(draft.targetMigrations[sourceDate] || {}), targetDate };
     });
     alert(`已将 ${sources.length} 个未完成目标迁移到 ${scopeDisplay("day", targetDate)}。`);
   }
@@ -6265,12 +6809,28 @@
     const targetKey = scopeKey("day", targetDate);
     const sourceList = targetsForScopeDraft(draft, "day", sourceKey);
     const targetList = targetsForScopeDraft(draft, "day", targetKey);
+    migration.ignoredSourceTargetIds = Array.isArray(migration.ignoredSourceTargetIds) ? migration.ignoredSourceTargetIds : [];
+    const ignoredSourceIds = new Set(migration.ignoredSourceTargetIds.map(String));
     for (let index = targetList.length - 1; index >= 0; index -= 1) {
       if (targetList[index]?.migration?.sourceDate === sourceDate) targetList.splice(index, 1);
     }
-    sourceList.filter((target) => !isTaskDone(target)).forEach((target) => {
+    sourceList.filter((target) => !isTaskDone(target) && !ignoredSourceIds.has(String(target.id))).forEach((target) => {
       targetList.push(cloneTargetForMigration(target, sourceDate));
     });
+  }
+
+  function markMigratedTargetIgnored(draft, target) {
+    const migration = target?.migration;
+    const sourceDate = migration?.sourceDate;
+    const sourceTargetId = migration?.sourceTargetId;
+    if (!sourceDate || !sourceTargetId) return;
+    draft.targetMigrations ||= {};
+    draft.targetMigrations[sourceDate] ||= { targetDate: nextScopeDate("day", sourceDate) };
+    const record = draft.targetMigrations[sourceDate];
+    record.ignoredSourceTargetIds = Array.isArray(record.ignoredSourceTargetIds) ? record.ignoredSourceTargetIds : [];
+    if (!record.ignoredSourceTargetIds.map(String).includes(String(sourceTargetId))) {
+      record.ignoredSourceTargetIds.push(sourceTargetId);
+    }
   }
 
   function cloneTargetForMigration(target, completedDate = dateKey()) {
@@ -6299,18 +6859,19 @@
   }
 
   function stepProgress(targetId, subtaskId, delta) {
-    setState(() => {
+    setState((draft) => {
       const target = getTarget(targetId);
       const item = subtaskId ? findChild(target, subtaskId) : target;
       if (!item) return;
       item.done = clamp((item.done || 0) + delta, 0, item.total || 1);
       if (item.done >= (item.total || 1)) item.completedAt = item.completedAt || dateKey();
       else item.completedAt = "";
+      if (target && isTaskDone(target)) markMigratedTargetIgnored(draft, target);
     });
   }
 
   function setSubtaskDone(targetId, subtaskId, checked) {
-    setState(() => {
+    setState((draft) => {
       const target = getTarget(targetId);
       const item = findChild(target, subtaskId);
       if (!item) return;
@@ -6320,6 +6881,7 @@
         child.done = checked ? child.total || 1 : 0;
         child.completedAt = checked ? child.completedAt || dateKey() : "";
       });
+      if (target && isTaskDone(target)) markMigratedTargetIgnored(draft, target);
     });
   }
 
@@ -6933,6 +7495,7 @@
   }
 
   function isTaskDone(target) {
+    if (target?.completedAt) return true;
     if (!target.hasProgress) return false;
     const progress = targetProgress(target);
     return progress.total > 0 && progress.done >= progress.total;

@@ -1578,6 +1578,7 @@ textarea:focus {
 }
 
 .weekly-breakdown-card,
+.review-prompt-card,
 .weekly-reflection-card,
 .weekly-next-card,
 .monthly-table-card,
@@ -1590,6 +1591,32 @@ textarea:focus {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #fbfcfa;
+}
+
+.review-prompt-card {
+  padding: 10px;
+}
+
+.review-prompt-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.review-prompt-field {
+  min-width: 0;
+}
+
+.review-prompt-field textarea {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+}
+
+.review-prompt-static-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .weekly-brief-summary p {
@@ -3569,8 +3596,14 @@ button.review-star {
     grid-template-columns: 1fr;
   }
 
+  .review-prompt-grid,
+  .review-prompt-static-stack {
+    grid-template-columns: 1fr;
+  }
+
   .weekly-brief-summary,
   .weekly-breakdown-card,
+  .review-prompt-card,
   .weekly-reflection-card,
   .weekly-next-card,
   .monthly-table-card,

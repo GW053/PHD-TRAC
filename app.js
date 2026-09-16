@@ -15,6 +15,7 @@
     { id: "dorm", name: "宿舍", color: "#4d8b57" },
   ];
   const DEFAULT_LOCATION_ID = "outdoor";
+  const REVIEW_PROMPT_FIELDS = ["happened", "progress", "lucky", "desire"];
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -67,6 +68,7 @@
     targetMigrations: {},
     habits: [],
     reviews: {},
+    dailyReviews: {},
     weeklyReviews: {},
     monthlyReviews: {},
   };
@@ -131,6 +133,7 @@
     normalized.locationDescriptions ||= {};
     normalized.holidays = normalizeHolidayRanges(normalized.holidays);
     normalized.targetMigrations ||= {};
+    normalized.dailyReviews ||= {};
     normalized.weeklyReviews ||= {};
     normalized.monthlyReviews ||= {};
     normalized.settings.targetTags = targetTagListFromState(normalized);
@@ -211,6 +214,7 @@
       targetMigrations: { ...(remote.targetMigrations || {}), ...(local.targetMigrations || {}) },
       habits: mergeHabits(remote.habits || [], local.habits || []),
       reviews: mergeScopedCollections(remote.reviews || {}, local.reviews || {}),
+      dailyReviews: { ...(remote.dailyReviews || {}), ...(local.dailyReviews || {}) },
       weeklyReviews: { ...(remote.weeklyReviews || {}), ...(local.weeklyReviews || {}) },
       monthlyReviews: { ...(remote.monthlyReviews || {}), ...(local.monthlyReviews || {}) },
     });
@@ -1123,12 +1127,6 @@
     return `
       <section class="summary-scope-card active-summary-scope">
         ${renderRecordTrendChart(dates)}
-        <div class="stat-list habit-rate-row">
-          <div class="stat-row">
-            <span>习惯平均达标率</span>
-            <strong>${habitRateForDates(dates)}%</strong>
-          </div>
-        </div>
       </section>
     `;
   }
@@ -1172,13 +1170,8 @@
       if (!normalizeDateKey(key)) return;
       if (normalizeLocationRecords(locations).records.some((entry) => entry.start || entry.end)) candidates.add(key);
     });
-    (state.habits || []).forEach((habit) => {
-      Object.entries(habit.records || {}).forEach(([key, value]) => {
-        if (normalizeDateKey(key) && Number(value) > 0) candidates.add(key);
-      });
-    });
     return Array.from(candidates)
-      .filter((key) => studySummaryForDates([key]).total > 0 || workSummaryForDates([key]).total > 0 || habitRateForDates([key]) > 0)
+      .filter((key) => studySummaryForDates([key]).total > 0 || workSummaryForDates([key]).total > 0)
       .sort()
       .at(-1) || dateKey();
   }
@@ -1510,21 +1503,6 @@
           </div>
         </section>
 
-        <section class="section-band habit-section">
-          <div class="section-title">
-            <div>
-              <h2>习惯追踪</h2>
-              <p class="hint">${habitTrailRangeText()}</p>
-            </div>
-            <div class="button-row">
-              <button class="secondary-button add-button" type="button" data-action="add-habit" aria-label="新增习惯">+</button>
-              <button class="primary-button" type="button" data-action="toggle-habit-edit">${ui.habitEditing ? "完成" : "编辑"}</button>
-            </div>
-          </div>
-          <div class="habit-stack">
-            ${state.habits.length ? state.habits.map(renderHabit).join("") : `<p class="empty">还没有习惯，添加一个从今天开始追踪。</p>`}
-          </div>
-        </section>
       </section>
     `;
   }
@@ -1742,7 +1720,9 @@
     if (scope === "week") return renderWeeklyReviewSection();
     if (scope === "month") return renderMonthlyReviewSection();
     const date = reviewDate(scope);
+    const key = scopeKey(scope, date);
     const reviewItems = reviewsForScope(scope, date);
+    const dailyReview = dailyReviewForKey(key);
     const holiday = isHolidayDate(date);
     return `
       <section class="section-band review-scope-section" data-review-scope="${scope}">
@@ -1757,6 +1737,7 @@
             <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
           </div>
         </div>
+        ${renderReviewPromptFields("day", dailyReview, key)}
         <div class="review-stack">
           ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, scope)).join("") : `<p class="empty">还没有复盘事项。</p>`}
         </div>
@@ -1801,6 +1782,7 @@
             ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
         </div>
+        ${renderReviewPromptFields("week", review, key)}
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("week", date)), "地点时间占比", "本周还没有地点时间。")}
         ${renderStudyBreakdownCard(weeklyStudyBreakdown(date), "学习标签占比", "本周还没有学习记录。")}
@@ -1848,6 +1830,7 @@
             ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
         </div>
+        ${renderReviewPromptFields("month", review, key)}
         ${renderMonthlyStatsTable(date)}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("month", date)), "地点时间占比", "本月还没有地点时间。")}
         ${renderStudyBreakdownCard(monthlyStudyBreakdown(date), "学习标签占比（月）", "本月还没有学习记录。")}
@@ -2100,6 +2083,45 @@
         ${renderMonthlyTextField("", field, value, key, description)}
       </section>
     `;
+  }
+
+  function renderReviewPromptFields(scope, review, key) {
+    const labels = reviewPromptLabels(scope);
+    const action = scope === "day" ? "update-day-review" : scope === "week" ? "update-week-review" : "update-month-review";
+    const keyName = scope === "day" ? "data-day-review-key" : scope === "week" ? "data-weekly-review-key" : "data-month-review-key";
+    return `
+      <section class="review-prompt-card">
+        <div class="review-prompt-grid">
+          ${REVIEW_PROMPT_FIELDS.map((field) => {
+            const tone = bulletToneForField(field);
+            return `
+              <label class="form-row review-prompt-field">
+                <span class="field-label ${tone}-field">${escapeHtml(labels[field])}</span>
+                ${renderBulletTextarea({
+                  tone,
+                  value: review[field] || "",
+                  action,
+                  keyName,
+                  key,
+                  field,
+                  placeholder: "",
+                })}
+              </label>
+            `;
+          }).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function reviewPromptLabels(scope) {
+    const subject = scope === "month" ? "这个月" : scope === "week" ? "这周" : "今天";
+    return {
+      happened: `${subject}发生了什么`,
+      progress: `${subject}取得的进展`,
+      lucky: `${subject}幸运的事情`,
+      desire: `${subject}渴望的事情`,
+    };
   }
 
   function renderMonthlyTextField(label, field, value, key, placeholder) {
@@ -2475,7 +2497,7 @@
   }
 
   function defaultExportItems(scope = state.activeTab) {
-    if (scope === "execute") return new Set(["execute-targets", "execute-habits"]);
+    if (scope === "execute") return new Set(["execute-targets"]);
     if (scope === "review") return new Set([`review-${state.reviewScope || "day"}`]);
     return new Set(["record-logs", "record-summary"]);
   }
@@ -2487,7 +2509,6 @@
           "执行",
           [
             ["execute-targets", "目标情况", scopeDisplay("day", dateKey())],
-            ["execute-habits", "习惯情况", habitTrailRangeText()],
           ],
         ],
       ];
@@ -2524,7 +2545,6 @@
       "record-location": "地点时间",
       "record-summary": "地点与学习统计",
       "execute-targets": "目标情况",
-      "execute-habits": "习惯情况",
       "review-day": "日复盘",
       "review-week": "周复盘",
       "review-month": "月复盘概览",
@@ -2539,7 +2559,6 @@
     if (item === "record-logs") return `${dateKey()} ${weekdayText(dateKey())}`;
     if (item === "record-summary") return recordSummaryExportMeta();
     if (item === "execute-targets") return scopeDisplay("day", dateKey());
-    if (item === "execute-habits") return habitTrailRangeText();
     if (item === "review-day") return scopeDisplay("day", reviewDate("day"));
     if (item === "review-week") return reviewNavigatorDisplay("week", reviewDate("week"));
     if (item === "review-month" || item === "review-month-red" || item === "review-month-green" || item === "review-month-summary") return scopeDisplay("month", reviewDate("month"));
@@ -2579,8 +2598,7 @@
     if (item === "record-location") return locationEntriesForDate(day, locationRecordsForDate(day)).some((entry) => entry.type && (entry.start || entry.end));
     if (item === "record-summary") return hasRecordSummaryExportData();
     if (item === "execute-targets") return targetsForCurrentScope().length > 0;
-    if (item === "execute-habits") return state.habits.length > 0;
-    if (item === "review-day") return reviewItemsForExport("day", reviewDate("day")).some(reviewItemHasContent);
+    if (item === "review-day") return dailyReviewHasText(readDailyReviewForKey(scopeKey("day", reviewDate("day")))) || reviewItemsForExport("day", reviewDate("day")).some(reviewItemHasContent);
     if (item === "review-week") return hasWeeklyReviewExportData(reviewDate("week"));
     if (item === "review-month") return hasMonthlyReviewExportData(reviewDate("month"));
     if (item === "review-month-red") return hasMonthlyLightExportData("red", reviewDate("month"));
@@ -2600,8 +2618,7 @@
     const dates = recentRecordChartDates();
     return (
       locationBreakdownForDates([dateKey()]).total > 0 ||
-      dates.some((itemDate) => studySummaryForDates([itemDate]).total > 0 || workSummaryForDates([itemDate]).total > 0) ||
-      habitRateForDates(dates) > 0
+      dates.some((itemDate) => studySummaryForDates([itemDate]).total > 0 || workSummaryForDates([itemDate]).total > 0)
     );
   }
 
@@ -2621,12 +2638,20 @@
     );
   }
 
+  function reviewPromptHasText(review) {
+    return REVIEW_PROMPT_FIELDS.some((field) => review?.[field]?.trim());
+  }
+
+  function dailyReviewHasText(review) {
+    return reviewPromptHasText(review);
+  }
+
   function weeklyReviewHasText(review) {
-    return Boolean(review.red?.trim() || review.green?.trim() || review.summary?.trim() || review.nextDirection?.trim());
+    return Boolean(reviewPromptHasText(review) || review.red?.trim() || review.green?.trim() || review.summary?.trim() || review.nextDirection?.trim());
   }
 
   function monthlyReviewHasText(review) {
-    return Boolean(review.redInsight?.trim() || review.greenInsight?.trim() || review.summary?.trim() || review.nextDirection?.trim());
+    return Boolean(reviewPromptHasText(review) || review.redInsight?.trim() || review.greenInsight?.trim() || review.summary?.trim() || review.nextDirection?.trim());
   }
 
   function hasWeeklyReviewExportData(date) {
@@ -2653,10 +2678,12 @@
   }
 
   function hasMonthlyReviewExportData(date) {
+    const key = scopeKey("month", date);
     return (
       monthlyStatsHasData(date) ||
       locationBreakdownForDates(datesInScope("month", date)).total > 0 ||
-      monthlyStudyBreakdown(date).total > 0
+      monthlyStudyBreakdown(date).total > 0 ||
+      monthlyReviewHasText(normalizeMonthlyReview(state.monthlyReviews?.[key] || {}))
     );
   }
 
@@ -2744,8 +2771,6 @@
     if (locationCanvas) canvases.push(locationCanvas);
     const chartCanvas = await makeRecordSummaryChartCanvas(scope);
     if (chartCanvas) canvases.push(chartCanvas);
-    const habitCanvas = makeRecordSummaryHabitCanvas();
-    if (habitCanvas) canvases.push(habitCanvas);
     if (canvases.length) return assertExportCanvasReadable(combineExportCanvases(canvases), exportItemName("record-summary"));
     return makeManualRecordSummaryCanvas();
   }
@@ -2770,18 +2795,6 @@
       console.warn("Record chart SVG export failed; using chart fallback.", error);
       return makeRecordSummaryChartFallbackCanvas();
     }
-  }
-
-  function makeRecordSummaryHabitCanvas() {
-    const rate = habitRateForDates(recentRecordChartDates());
-    if (!(rate > 0)) return null;
-    return makeManualCardsCanvas("习惯平均达标率", recordChartRangeText(), [
-      {
-        heading: "习惯平均达标率",
-        lines: [`${rate}%`],
-        accent: cssVarColor("--accent-2", colors[1]),
-      },
-    ]);
   }
 
   function makeRecordLocationBreakdownCanvas() {
@@ -3129,6 +3142,8 @@
       ".export-date-line",
       ".section-title",
       ".weekly-brief-summary",
+      ".review-prompt-card",
+      ".review-prompt-static",
       ".weekly-breakdown-card",
       ".monthly-table-card",
       ".review-item",
@@ -3174,7 +3189,6 @@
     if (item === "review-month-green") return makeManualMonthLightCanvas("green");
     if (item === "review-month-summary") return makeManualMonthSummaryCanvas();
     if (item === "execute-targets") return makeManualTargetsCanvas();
-    if (item === "execute-habits") return makeManualHabitsCanvas();
     if (item === "record-logs") return makeManualRecordLogsCanvas();
     if (item === "record-summary") return makeManualRecordSummaryCanvas();
     return null;
@@ -3233,11 +3247,14 @@
 
   function makeManualDayReviewCanvas() {
     const date = reviewDate("day");
-    const cards = reviewItemsForExport("day", date)
+    const dailyReview = readDailyReviewForKey(scopeKey("day", date));
+    const cards = [];
+    appendReviewPromptManualCards(cards, "day", dailyReview);
+    reviewItemsForExport("day", date)
       .filter(reviewItemHasContent)
-      .map((item, index) => {
+      .forEach((item, index) => {
         const review = normalizeReviewItem(item);
-        return {
+        cards.push({
           type: "day-review",
           heading: `现象${index + 1}`,
           phenomenonLabel: `现象${index + 1}`,
@@ -3251,7 +3268,7 @@
             }))
             .filter((reason) => reason.text || reason.measure),
           accent: cssVarColor("--accent", colors[index % colors.length]),
-        };
+        });
       });
     return makeManualCardsCanvas("日复盘", scopeDisplay("day", date), cards);
   }
@@ -3265,6 +3282,7 @@
     const cards = [];
     const holidaySummary = weeklyHolidaySummaryText(date);
     if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    appendReviewPromptManualCards(cards, "week", review);
     if (study.total || work.total) {
       cards.push({
         heading: "时间概览",
@@ -3306,6 +3324,7 @@
     const cards = [];
     const holidaySummary = monthlyHolidaySummaryText(date);
     if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    appendReviewPromptManualCards(cards, "month", review);
     appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates(dates));
     appendBreakdownManualCard(cards, "学习标签占比（月）", monthlyStudyBreakdown(date));
     [
@@ -3326,6 +3345,7 @@
     const cards = [];
     const holidaySummary = monthlyHolidaySummaryText(date);
     if (holidaySummary) cards.push({ heading: "假期", lines: [holidaySummary], accent: "#4d8b57" });
+    appendReviewPromptManualCards(cards, "month", normalizeMonthlyReview(state.monthlyReviews?.[scopeKey("month", date)] || {}));
     appendMonthlyStatsManualCard(cards, date);
     appendBreakdownManualCard(cards, "地点时间占比", locationBreakdownForDates(dates));
     appendBreakdownManualCard(cards, "学习标签占比（月）", monthlyStudyBreakdown(date));
@@ -3376,23 +3396,6 @@
       if (lines.length) cards.push({ heading, lines, accent });
     });
     return makeManualCardsCanvas("月总结", scopeDisplay("month", date), cards);
-  }
-
-  function makeManualHabitsCanvas() {
-    const dates = lastNDates(dateKey(), 7);
-    const cards = (state.habits || []).map((habit) => {
-      const color = habit.color || colors[0];
-      const values = dates.map((itemDate) => clamp(Number(habit.records?.[itemDate]) || 0, 0, 100));
-      return {
-        type: "habit",
-        heading: habit.name || "未命名习惯",
-        color,
-        values,
-        todayPercent: clamp(Number(habit.records?.[dateKey()]) || 0, 0, 100),
-        accent: color,
-      };
-    });
-    return makeManualCardsCanvas("习惯情况", habitTrailRangeText(), cards);
   }
 
   function makeManualTargetsCanvas() {
@@ -3491,15 +3494,15 @@
         accent: cssVarColor("--accent", colors[0]),
       });
     }
-    const habitRate = habitRateForDates(dates);
-    if (habitRate > 0) {
-      cards.push({
-        heading: "习惯平均达标率",
-        lines: [`${habitRate}%`],
-        accent: cssVarColor("--accent-2", colors[1]),
-      });
-    }
     return makeManualCardsCanvas("地点与学习统计", recordSummaryExportMeta(), cards);
+  }
+
+  function appendReviewPromptManualCards(cards, scope, review) {
+    const labels = reviewPromptLabels(scope);
+    REVIEW_PROMPT_FIELDS.forEach((field, index) => {
+      const lines = locationDescriptionLines(review?.[field] || "");
+      if (lines.length) cards.push({ heading: labels[field], lines, accent: colors[index % colors.length] });
+    });
   }
 
   function appendBreakdownManualCard(cards, heading, breakdown) {
@@ -4352,8 +4355,6 @@
     } else if (item === "execute-targets") {
       appendClone(app.querySelector(".target-filter-band"));
       appendClone(app.querySelector(".target-section"));
-    } else if (item === "execute-habits") {
-      appendClone(app.querySelector(".habit-section"));
     } else if (item === "review-day") {
       appendClone(app.querySelector('[data-review-scope="day"]'));
     } else if (item === "review-week") {
@@ -4440,7 +4441,7 @@
     $$(".bullet-textarea", fragment).forEach((textarea) => {
       if (!textarea.value.trim()) textarea.closest(".form-row, .monthly-next-card, .monthly-insight-card")?.remove();
     });
-    $$(".weekly-reflection-card, .weekly-next-card, .monthly-next-card, .monthly-light-item, .monthly-insight-card, .review-item, .monthly-key-event, .monthly-key-card, .weekly-breakdown-card, .monthly-table-card", fragment).forEach((node) => {
+    $$(".review-prompt-card, .weekly-reflection-card, .weekly-next-card, .monthly-next-card, .monthly-light-item, .monthly-insight-card, .review-item, .monthly-key-event, .monthly-key-card, .weekly-breakdown-card, .monthly-table-card", fragment).forEach((node) => {
       if (node.querySelector("textarea, .review-text, .monthly-stats-table, .weekly-stacked-bar, .entry, .task-group, .habit-panel, .monthly-light-item, .monthly-key-event")) return;
       node.remove();
     });
@@ -4602,18 +4603,6 @@
     `;
   }
 
-  function renderHabitsExport() {
-    if (!state.habits.length) return "";
-    return `
-      <section class="section-band export-block">
-        <div class="section-title"><div><h2>习惯追踪</h2><p class="hint">${habitTrailRangeText()}</p></div></div>
-        <div class="habit-stack">
-          ${state.habits.map(renderHabit).join("")}
-        </div>
-      </section>
-    `;
-  }
-
   function renderWeekReviewExport() {
     const date = reviewDate("week");
     const key = scopeKey("week", date);
@@ -4623,6 +4612,7 @@
       <section class="section-band review-scope-section weekly-review-section export-block" data-review-scope="week">
         ${renderReviewNavigator("week")}
         <div class="section-title"><div><h2>周复盘</h2><p class="hint">${scopeDisplay("week", date)}</p></div></div>
+        ${renderReviewPromptStatic("week", review)}
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("week", date)), "地点时间占比", "")}
         ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比", "") : ""}
@@ -4634,8 +4624,9 @@
   function renderDayReviewExport() {
     const scope = "day";
     const date = reviewDate(scope);
+    const dailyReview = readDailyReviewForKey(scopeKey(scope, date));
     const reviewItems = reviewItemsForExport(scope, date).filter(reviewItemHasContent);
-    if (!reviewItems.length) return "";
+    if (!reviewItems.length && !dailyReviewHasText(dailyReview)) return "";
     return `
       <section class="section-band review-scope-section export-block" data-review-scope="${scope}">
         ${renderReviewNavigator(scope)}
@@ -4645,12 +4636,29 @@
             <p class="hint">${scopeDisplay(scope, date)}</p>
           </div>
         </div>
+        ${renderReviewPromptStatic("day", dailyReview)}
         <div class="review-stack">
           ${reviewItems.map((item, index) => renderReviewItemExport(item, index, scope)).join("")}
         </div>
         ${renderReviewDueReminder(date)}
       </section>
     `;
+  }
+
+  function renderReviewPromptStatic(scope, review) {
+    const labels = reviewPromptLabels(scope);
+    const cards = REVIEW_PROMPT_FIELDS.map((field) => {
+      const value = review?.[field]?.trim() || "";
+      if (!value) return "";
+      const tone = bulletToneForField(field);
+      return `
+        <section class="weekly-next-card review-prompt-static ${tone}">
+          <div class="weekly-card-title"><i class="weekly-icon ${tone}"></i><strong>${escapeHtml(labels[field])}</strong></div>
+          <p class="review-text">${escapeMultiline(value)}</p>
+        </section>
+      `;
+    }).join("");
+    return cards ? `<div class="review-prompt-static-stack">${cards}</div>` : "";
   }
 
   function renderReviewItemExport(item, index, scope = "day") {
@@ -4705,6 +4713,7 @@
       <section class="section-band review-scope-section monthly-review-section export-block" data-review-scope="month">
         ${renderReviewNavigator("month")}
         <div class="section-title"><div><h2>月复盘</h2><p class="hint">${scopeDisplay("month", date)}</p></div></div>
+        ${renderReviewPromptStatic("month", review)}
         ${monthlyStatsHasData(date) ? renderMonthlyStatsTable(date, { omitEmptyRows: true }) : ""}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("month", date)), "地点时间占比", "")}
         ${breakdown.total ? renderStudyBreakdownCard(breakdown, "学习标签占比（月）", "") : ""}
@@ -6217,6 +6226,7 @@
     if (action === "update-habit") updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, false);
     if (action === "update-review-item") updateReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
     if (action === "update-review-reason") updateReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
+    if (action === "update-day-review") updateDailyReviewField(actionNode.dataset.dayReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "update-week-review") updateWeeklyReviewField(actionNode.dataset.weeklyReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "update-month-review") updateMonthlyReviewField(actionNode.dataset.monthReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "set-review-date") setReviewDate(actionNode.value);
@@ -6266,6 +6276,11 @@
   document.addEventListener("paste", (event) => {
     if (!(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains("bullet-textarea")) return;
     window.setTimeout(() => sanitizeBulletTextarea(event.target, { removeEmptyLines: false, dispatch: true }), 0);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains("bullet-textarea")) return;
+    handleBulletTextareaKeydown(event);
   });
 
   let waterMotionTimer = null;
@@ -7003,15 +7018,22 @@
     });
   }
 
+  function updateDailyReviewField(key, field, value) {
+    if (!REVIEW_PROMPT_FIELDS.includes(field)) return;
+    const review = dailyReviewForKey(key || scopeKey("day", reviewDate("day")));
+    review[field] = normalizeBulletTextareaValue(value);
+    saveState();
+  }
+
   function updateWeeklyReviewField(key, field, value) {
-    if (!["red", "green", "summary", "nextDirection"].includes(field)) return;
+    if (![...REVIEW_PROMPT_FIELDS, "red", "green", "summary", "nextDirection"].includes(field)) return;
     const review = weeklyReviewForKey(key || scopeKey("week", reviewDate("week")));
     review[field] = normalizeBulletTextareaValue(value);
     saveState();
   }
 
   function updateMonthlyReviewField(key, field, value) {
-    if (!["redInsight", "greenInsight", "summary", "nextDirection"].includes(field)) return;
+    if (![...REVIEW_PROMPT_FIELDS, "redInsight", "greenInsight", "summary", "nextDirection"].includes(field)) return;
     const review = monthlyReviewForKey(key || scopeKey("month", reviewDate("month")));
     review[field] = normalizeBulletTextareaValue(value);
     saveState();
@@ -7233,6 +7255,20 @@
     return total ? Math.round((completed / total) * 100) : 0;
   }
 
+  function dailyReviewForKey(key) {
+    state.dailyReviews ||= {};
+    state.dailyReviews[key] = normalizeDailyReview(state.dailyReviews[key]);
+    return state.dailyReviews[key];
+  }
+
+  function readDailyReviewForKey(key) {
+    return normalizeDailyReview(state.dailyReviews?.[key] || {});
+  }
+
+  function normalizeDailyReview(review = {}) {
+    return normalizeReviewPromptRecord(review);
+  }
+
   function weeklyReviewForKey(key) {
     state.weeklyReviews ||= {};
     state.weeklyReviews[key] = normalizeWeeklyReview(state.weeklyReviews[key]);
@@ -7245,6 +7281,7 @@
 
   function normalizeWeeklyReview(review = {}) {
     return {
+      ...normalizeReviewPromptRecord(review),
       red: review.red || "",
       green: review.green || "",
       summary: review.summary || "",
@@ -7260,10 +7297,20 @@
 
   function normalizeMonthlyReview(review = {}) {
     return {
+      ...normalizeReviewPromptRecord(review),
       redInsight: review.redInsight || review.red || "",
       greenInsight: review.greenInsight || review.green || "",
       summary: review.summary || "",
       nextDirection: review.nextDirection || review.direction || "",
+    };
+  }
+
+  function normalizeReviewPromptRecord(review = {}) {
+    return {
+      happened: review.happened || review.whatHappened || review.todayHappened || "",
+      progress: review.progress || review.advance || review.todayProgress || "",
+      lucky: review.lucky || review.luck || "",
+      desire: review.desire || review.wish || review.craving || "",
     };
   }
 
@@ -7662,7 +7709,16 @@
   }
 
   function bulletToneForField(field) {
-    return { redInsight: "red", greenInsight: "green", summary: "amber", nextDirection: "blue" }[field] || "blue";
+    return {
+      happened: "blue",
+      progress: "green",
+      lucky: "amber",
+      desire: "red",
+      redInsight: "red",
+      greenInsight: "green",
+      summary: "amber",
+      nextDirection: "blue",
+    }[field] || "blue";
   }
 
   function renderBulletTextarea({ tone, value = "", action, keyName, key, field, placeholder }) {
@@ -8423,6 +8479,30 @@
     const layer = textarea.closest(".bullet-textarea-wrap")?.querySelector(".bullet-line-layer");
     if (!layer) return;
     layer.innerHTML = renderBulletMarkers(textarea.value, { showPending: document.activeElement === textarea });
+  }
+
+  function handleBulletTextareaKeydown(event) {
+    const textarea = event.target;
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? start;
+    const value = textarea.value;
+    const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const nextBreak = value.indexOf("\n", start);
+    const lineEnd = nextBreak === -1 ? value.length : nextBreak;
+    const currentLine = value.slice(lineStart, lineEnd);
+    if (event.key === "Enter" && start === end && !currentLine.trim()) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key !== "Backspace" || start !== end || currentLine.trim() || lineStart <= 0) return;
+    event.preventDefault();
+    const nextValue = `${value.slice(0, lineStart - 1)}${value.slice(lineEnd)}`;
+    textarea.value = nextValue;
+    const nextPosition = lineStart - 1;
+    textarea.setSelectionRange(nextPosition, nextPosition);
+    autoResizeTextarea(textarea);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   function normalizeBulletTextareaValue(value, options = {}) {

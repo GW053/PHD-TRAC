@@ -6,8 +6,8 @@
   const SUPABASE_TABLE = "phd_trac_records";
   const SLEEP_SOURCE_TABLE = "daily_record_sync";
   const SLEEP_STAT_KEY = "__sleep";
-  const APP_VERSION = "v1.7";
-  const VERSION_UPDATED_AT = "2026-07-08";
+  const APP_VERSION = "v1.8";
+  const VERSION_UPDATED_AT = "2026-09-24";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
   const defaultLocationTypes = [
     { id: "outdoor", name: "户外", color: "#d8b74e" },
@@ -16,6 +16,44 @@
   ];
   const DEFAULT_LOCATION_ID = "outdoor";
   const REVIEW_PROMPT_FIELDS = ["happened", "progress", "lucky", "desire"];
+  const DEFAULT_REVIEW_GROUPS = [
+    {
+      id: "day",
+      name: "日复盘",
+      scope: "day",
+      builtIn: true,
+      prompts: [
+        { id: "happened", label: "今天发生了什么", tone: "blue" },
+        { id: "progress", label: "今天取得的进展", tone: "green" },
+        { id: "lucky", label: "今天幸运的事情", tone: "amber" },
+        { id: "desire", label: "今天渴望的事情", tone: "red" },
+      ],
+    },
+    {
+      id: "week",
+      name: "周复盘",
+      scope: "week",
+      builtIn: true,
+      prompts: [
+        { id: "happened", label: "这周发生了什么", tone: "blue" },
+        { id: "progress", label: "这周取得的进展", tone: "green" },
+        { id: "lucky", label: "这周幸运的事情", tone: "amber" },
+        { id: "desire", label: "这周渴望的事情", tone: "red" },
+      ],
+    },
+    {
+      id: "month",
+      name: "月复盘",
+      scope: "month",
+      builtIn: true,
+      prompts: [
+        { id: "happened", label: "这个月发生了什么", tone: "blue" },
+        { id: "progress", label: "这个月取得的进展", tone: "green" },
+        { id: "lucky", label: "这个月幸运的事情", tone: "amber" },
+        { id: "desire", label: "这个月渴望的事情", tone: "red" },
+      ],
+    },
+  ];
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -59,6 +97,7 @@
       expectedWorkHours: "",
       expectedStudyVisible: true,
       expectedWorkVisible: true,
+      reviewGroups: DEFAULT_REVIEW_GROUPS,
     },
     logs: {},
     locationLogs: {},
@@ -71,6 +110,7 @@
     dailyReviews: {},
     weeklyReviews: {},
     monthlyReviews: {},
+    reviewPromptAnswers: {},
   };
 
   let state = normalizeStateShape(loadState());
@@ -107,6 +147,9 @@
     recordChartWindowOffset: 0,
     monthReviewMode: "red",
     expandedKeyEvents: new Set(),
+    reviewGroupsInitialized: false,
+    reviewGroupEditing: false,
+    openReviewHistoryGroup: "",
   };
 
   function loadState() {
@@ -136,6 +179,8 @@
     normalized.dailyReviews ||= {};
     normalized.weeklyReviews ||= {};
     normalized.monthlyReviews ||= {};
+    normalized.reviewPromptAnswers ||= {};
+    normalized.settings.reviewGroups = normalizeReviewGroups(normalized.settings.reviewGroups);
     normalized.settings.targetTags = targetTagListFromState(normalized);
     normalized.settings.targetDefaultTag = normalizedTargetDefaultTag(normalized.settings.targetDefaultTag, normalized.settings.targetTags);
     normalized.settings.locationTypes = normalizeLocationTypes(normalized.settings.locationTypes);
@@ -217,6 +262,7 @@
       dailyReviews: { ...(remote.dailyReviews || {}), ...(local.dailyReviews || {}) },
       weeklyReviews: { ...(remote.weeklyReviews || {}), ...(local.weeklyReviews || {}) },
       monthlyReviews: { ...(remote.monthlyReviews || {}), ...(local.monthlyReviews || {}) },
+      reviewPromptAnswers: mergeNestedTextMaps(remote.reviewPromptAnswers || {}, local.reviewPromptAnswers || {}),
     });
   }
 
@@ -377,7 +423,7 @@
 
   function reviewsForScope(scope, date = reviewDate(scope)) {
     state.reviews[scope] ||= {};
-    const key = scopeKey(scope, date);
+    const key = reviewPeriodKeyForScope(scope, date);
     state.reviews[scope][key] ||= [];
     state.reviews[scope][key] = state.reviews[scope][key].map(normalizeReviewItem);
     return state.reviews[scope][key];
@@ -385,8 +431,14 @@
 
   function reviewDate(scope) {
     state.reviewDates ||= {};
-    state.reviewDates[scope] ||= dateKey();
+    const group = state.settings?.reviewGroups?.find((item) => item.id === scope);
+    state.reviewDates[scope] ||= state.reviewDates[group?.scope] || dateKey();
     return state.reviewDates[scope];
+  }
+
+  function reviewPeriodKeyForScope(scope, date = reviewDate(scope)) {
+    const group = state.settings?.reviewGroups?.find((item) => item.id === scope);
+    return scopeKey(group?.scope || scope, date);
   }
 
   function render() {
@@ -1681,67 +1733,82 @@
   }
 
   function renderReview() {
-    const activeScope = ["day", "week", "month"].includes(state.reviewScope) ? state.reviewScope : "day";
-    state.reviewScope = activeScope;
+    const groups = reviewGroups();
+    if (!ui.reviewGroupsInitialized) {
+      state.reviewScope = groups[0]?.id || "day";
+      ui.reviewGroupsInitialized = true;
+    }
+    const activeGroup = groups.find((group) => group.id === state.reviewScope) || groups[0];
+    state.reviewScope = activeGroup?.id || "day";
     $("#app").innerHTML = `
       <section class="view" data-view="review">
-        ${renderReviewTabs(activeScope)}
-        ${renderReviewScopeSection(activeScope)}
-      </section>
-    `;
-  }
-
-  function renderReviewTabs(activeScope) {
-    const scopes = [
-      ["day", "日复盘"],
-      ["week", "周复盘"],
-      ["month", "月复盘"],
-    ];
-    return `
-      <section class="section-band review-tab-panel">
-        <div class="review-tab-toolbar">
-          <div class="review-tabs">
-            ${scopes
-              .map(
-                ([scope, label]) => `
-                  <button class="toggle-button ${activeScope === scope ? "active" : ""}" type="button" data-action="set-review-scope" data-scope="${scope}">
-                    ${label}
-                  </button>
-                `,
-              )
-              .join("")}
+        <section class="section-band review-group-toolbar">
+          <div class="review-group-title-line">
+            <div><h2>复盘</h2></div>
+            <button class="primary-button" type="button" data-action="toggle-review-group-edit">${ui.reviewGroupEditing ? "完成" : "编辑"}</button>
           </div>
-        </div>
+          <div class="review-group-tabs">
+            ${groups.map((group, index) => renderReviewGroupTab(group, index, groups.length, activeGroup?.id)).join("")}
+            ${ui.reviewGroupEditing ? `<button class="secondary-button add-button review-group-add-tab" type="button" data-action="add-review-group" aria-label="新建复盘组">+</button>` : ""}
+          </div>
+        </section>
+        ${activeGroup ? `<section class="section-band review-active-panel">${renderReviewGroupBody(activeGroup)}${ui.openReviewHistoryGroup === activeGroup.id ? renderReviewGroupHistory(activeGroup) : ""}</section>` : ""}
       </section>
     `;
   }
 
-  function renderReviewScopeSection(scope) {
-    if (scope === "week") return renderWeeklyReviewSection();
-    if (scope === "month") return renderMonthlyReviewSection();
-    const date = reviewDate(scope);
-    const key = scopeKey(scope, date);
-    const reviewItems = reviewsForScope(scope, date);
-    const dailyReview = dailyReviewForKey(key);
+  function renderReviewGroupTab(group, index, total, activeId) {
+    const active = group.id === activeId;
+    return `
+      <span class="review-group-tab-wrap ${active ? "active" : ""}" data-review-group-id="${escapeAttr(group.id)}">
+        <button class="review-group-chip ${active ? "active" : ""}" type="button" data-action="set-active-review-group" data-review-group-id="${escapeAttr(group.id)}">
+          ${escapeHtml(group.name)}
+        </button>
+        ${
+          ui.reviewGroupEditing
+            ? `<span class="review-group-edit-actions">
+                <button class="ghost-button compact-action" type="button" data-action="edit-review-group" data-review-group-id="${escapeAttr(group.id)}">设置</button>
+                <span class="move-stack">
+                  <button class="move-button" type="button" data-action="move-review-group" data-review-group-id="${escapeAttr(group.id)}" data-direction="-1" ${index <= 0 ? "disabled" : ""} aria-label="上移">▴</button>
+                  <button class="move-button" type="button" data-action="move-review-group" data-review-group-id="${escapeAttr(group.id)}" data-direction="1" ${index >= total - 1 ? "disabled" : ""} aria-label="下移">▾</button>
+                </span>
+              </span>`
+            : ""
+        }
+      </span>
+    `;
+  }
+
+  function renderReviewGroupBody(group) {
+    if (group.id === "week") return renderWeeklyReviewSection(group);
+    if (group.id === "month") return renderMonthlyReviewSection(group);
+    return renderDailyLikeReviewSection(group);
+  }
+
+  function renderDailyLikeReviewSection(group) {
+    const date = reviewGroupDate(group);
+    const key = reviewGroupPeriodKey(group, date);
+    const reviewItems = reviewsForScope(group.id, date);
+    const reviewRecord = reviewPromptRecordForGroup(group, key);
     const holiday = isHolidayDate(date);
     return `
-      <section class="section-band review-scope-section" data-review-scope="${scope}">
-        ${renderReviewNavigator(scope)}
+      <section class="review-scope-section review-group-content" data-review-scope="${escapeAttr(group.id)}">
+        ${renderReviewGroupNavigator(group)}
         <div class="section-title">
           <div>
-            <h2>${reviewLabel(scope)}${holiday ? `<span class="holiday-inline-badge">假期</span>` : ""}</h2>
-            <p class="hint">${scopeDisplay(scope, date)}</p>
+            <h2>${escapeHtml(reviewPeriodTitle(group, date))}${holiday ? `<span class="holiday-inline-badge">假期</span>` : ""}</h2>
           </div>
           <div class="button-row">
-            <button class="secondary-button add-button" type="button" data-action="add-review-item" data-review-scope="${scope}" aria-label="新增现象">+</button>
+            <button class="ghost-button compact-action" type="button" data-action="toggle-review-history" data-review-group-id="${escapeAttr(group.id)}">往期</button>
+            <button class="secondary-button add-button" type="button" data-action="add-review-item" data-review-scope="${escapeAttr(group.id)}" aria-label="新增现象">+</button>
             <button class="primary-button" type="button" data-action="toggle-review-edit">${ui.reviewEditing ? "完成" : "编辑"}</button>
           </div>
         </div>
-        ${renderReviewPromptFields("day", dailyReview, key)}
+        ${renderReviewPromptFields(group, reviewRecord, key)}
         <div class="review-stack">
-          ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, scope)).join("") : `<p class="empty">还没有复盘事项。</p>`}
+          ${reviewItems.length ? reviewItems.map((item, index) => renderReviewItem(item, index, group.id)).join("") : `<p class="empty compact-empty">还没有新增现象。</p>`}
         </div>
-        ${renderReviewDueReminder(date)}
+        ${group.id === "day" ? renderReviewDueReminder(date) : ""}
       </section>
     `;
   }
@@ -1766,23 +1833,25 @@
     return monthlyReviewHasText(normalizeMonthlyReview(state.monthlyReviews?.[scopeKey("month", date)] || {}));
   }
 
-  function renderWeeklyReviewSection() {
-    const scope = "week";
-    const date = reviewDate(scope);
-    const key = scopeKey(scope, date);
+  function renderWeeklyReviewSection(group = reviewGroupById("week")) {
+    const scope = group?.scope || "week";
+    const date = reviewGroupDate(group);
+    const key = reviewGroupPeriodKey(group, date);
     const review = weeklyReviewForKey(key);
     const holidaySummary = weeklyHolidaySummaryText(date);
     return `
-      <section class="section-band review-scope-section weekly-review-section" data-review-scope="${scope}">
-        ${renderReviewNavigator(scope)}
+      <section class="review-scope-section weekly-review-section review-group-content" data-review-scope="${escapeAttr(group.id)}">
+        ${renderReviewGroupNavigator(group)}
         <div class="section-title">
           <div>
-            <h2>${reviewLabel(scope)}</h2>
-            <p class="hint">${scopeDisplay(scope, date)}</p>
+            <h2>${escapeHtml(reviewPeriodTitle(group, date))}</h2>
             ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
+          <div class="button-row">
+            <button class="ghost-button compact-action" type="button" data-action="toggle-review-history" data-review-group-id="${escapeAttr(group.id)}">往期</button>
+          </div>
         </div>
-        ${renderReviewPromptFields("week", review, key)}
+        ${renderReviewPromptFields(group, review, key)}
         ${renderWeeklyReviewSummary(date, { omitEmpty: true })}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("week", date)), "地点时间占比", "本周还没有地点时间。")}
         ${renderStudyBreakdownCard(weeklyStudyBreakdown(date), "学习标签占比", "本周还没有学习记录。")}
@@ -1814,23 +1883,25 @@
     return `<p><strong>${title}：</strong>总时长${formatHourText(totalMinutes)}/日均${formatHourText(average)}</p>`;
   }
 
-  function renderMonthlyReviewSection() {
-    const scope = "month";
-    const date = reviewDate(scope);
-    const key = scopeKey(scope, date);
+  function renderMonthlyReviewSection(group = reviewGroupById("month")) {
+    const scope = group?.scope || "month";
+    const date = reviewGroupDate(group);
+    const key = reviewGroupPeriodKey(group, date);
     const review = monthlyReviewForKey(key);
     const holidaySummary = monthlyHolidaySummaryText(date);
     return `
-      <section class="section-band review-scope-section monthly-review-section" data-review-scope="${scope}">
-        ${renderReviewNavigator(scope)}
+      <section class="review-scope-section monthly-review-section review-group-content" data-review-scope="${escapeAttr(group.id)}">
+        ${renderReviewGroupNavigator(group)}
         <div class="section-title">
           <div>
-            <h2>${reviewLabel(scope)}</h2>
-            <p class="hint">${scopeDisplay(scope, date)}</p>
+            <h2>${escapeHtml(reviewPeriodTitle(group, date))}</h2>
             ${holidaySummary ? `<p class="holiday-summary-text">${escapeHtml(holidaySummary)}</p>` : ""}
           </div>
+          <div class="button-row">
+            <button class="ghost-button compact-action" type="button" data-action="toggle-review-history" data-review-group-id="${escapeAttr(group.id)}">往期</button>
+          </div>
         </div>
-        ${renderReviewPromptFields("month", review, key)}
+        ${renderReviewPromptFields(group, review, key)}
         ${renderMonthlyStatsTable(date)}
         ${renderLocationBreakdownCard(locationBreakdownForDates(datesInScope("month", date)), "地点时间占比", "本月还没有地点时间。")}
         ${renderStudyBreakdownCard(monthlyStudyBreakdown(date), "学习标签占比（月）", "本月还没有学习记录。")}
@@ -2085,32 +2156,35 @@
     `;
   }
 
-  function renderReviewPromptFields(scope, review, key) {
-    const labels = reviewPromptLabels(scope);
-    const action = scope === "day" ? "update-day-review" : scope === "week" ? "update-week-review" : "update-month-review";
-    const keyName = scope === "day" ? "data-day-review-key" : scope === "week" ? "data-weekly-review-key" : "data-month-review-key";
+  function renderReviewPromptFields(group, review, key) {
+    const prompts = reviewGroupPrompts(group);
+    const hasText = reviewPromptHasText(review, prompts);
     return `
-      <section class="review-prompt-card">
+      <details class="review-prompt-card" ${hasText ? "open" : ""}>
+        <summary>
+          <span>记录</span>
+        </summary>
         <div class="review-prompt-grid">
-          ${REVIEW_PROMPT_FIELDS.map((field) => {
-            const tone = bulletToneForField(field);
+          ${prompts.map((prompt) => {
+            const tone = bulletToneForField(prompt.id, prompt.tone);
             return `
               <label class="form-row review-prompt-field">
-                <span class="field-label ${tone}-field">${escapeHtml(labels[field])}</span>
+                <span class="field-label ${tone}-field">${escapeHtml(prompt.label)}</span>
                 ${renderBulletTextarea({
                   tone,
-                  value: review[field] || "",
-                  action,
-                  keyName,
+                  value: review[prompt.id] || "",
+                  action: "update-review-prompt",
+                  keyName: "data-review-period-key",
                   key,
-                  field,
+                  field: prompt.id,
+                  extraAttrs: `data-review-group-id="${escapeAttr(group.id)}"`,
                   placeholder: "",
                 })}
               </label>
             `;
           }).join("")}
         </div>
-      </section>
+      </details>
     `;
   }
 
@@ -2122,6 +2196,138 @@
       lucky: `${subject}幸运的事情`,
       desire: `${subject}渴望的事情`,
     };
+  }
+
+  function reviewGroups() {
+    state.settings.reviewGroups = normalizeReviewGroups(state.settings.reviewGroups);
+    return state.settings.reviewGroups;
+  }
+
+  function reviewGroupById(groupId) {
+    return reviewGroups().find((group) => group.id === groupId) || reviewGroups()[0];
+  }
+
+  function reviewGroupPrompts(group) {
+    return normalizeReviewPrompts(group?.prompts, group?.scope);
+  }
+
+  function reviewGroupDate(group) {
+    const id = group?.id || "day";
+    state.reviewDates ||= {};
+    state.reviewDates[id] ||= state.reviewDates[group?.scope] || state.date || todayIso();
+    return state.reviewDates[id];
+  }
+
+  function reviewGroupPeriodKey(group, date = reviewGroupDate(group)) {
+    return scopeKey(group?.scope || "day", date);
+  }
+
+  function reviewGroupPeriodDisplay(group, date = reviewGroupDate(group)) {
+    const scope = group?.scope || "day";
+    return scope === "week" ? reviewNavigatorDisplay("week", date) : scopeDisplay(scope, date);
+  }
+
+  function reviewPeriodTitle(group, date = reviewGroupDate(group)) {
+    const scope = group?.scope || "day";
+    const suffix = group?.builtIn ? "复盘" : group?.name || "复盘";
+    if (scope === "month") return `${new Date(`${scopeKey("month", date)}T00:00:00`).getMonth() + 1}月${suffix}`;
+    if (scope === "week") return `${new Date(`${scopeKey("week", date)}T00:00:00`).getMonth() + 1}月第${weekOfMonth(scopeKey("week", date))}周${suffix}`;
+    return `${monthDayText(date)}${suffix}`;
+  }
+
+  function weekOfMonth(date) {
+    const parsed = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return 1;
+    return Math.max(1, Math.ceil(parsed.getDate() / 7));
+  }
+
+  function reviewPromptRecordForGroup(group, key = reviewGroupPeriodKey(group)) {
+    if (group.id === "day") return dailyReviewForKey(key);
+    if (group.id === "week") return weeklyReviewForKey(key);
+    if (group.id === "month") return monthlyReviewForKey(key);
+    state.reviewPromptAnswers ||= {};
+    state.reviewPromptAnswers[group.id] ||= {};
+    state.reviewPromptAnswers[group.id][key] = normalizeCustomReviewPromptAnswers(state.reviewPromptAnswers[group.id][key], group);
+    return state.reviewPromptAnswers[group.id][key];
+  }
+
+  function normalizeCustomReviewPromptAnswers(record = {}, group = {}) {
+    const next = {};
+    reviewGroupPrompts(group).forEach((prompt) => {
+      next[prompt.id] = record?.[prompt.id] || "";
+    });
+    return next;
+  }
+
+  function renderReviewGroupNavigator(group) {
+    const date = reviewGroupDate(group);
+    const scope = group.scope || "day";
+    return `
+      <div class="date-switch-panel scope-navigator review-scope-navigator">
+        <span class="date-label">${scopeSwitchLabel(scope)}</span>
+        <button class="date-arrow" type="button" data-action="shift-review-group-date" data-review-group-id="${escapeAttr(group.id)}" data-direction="-1" aria-label="上一个">‹</button>
+        <span class="date-display-field">${escapeHtml(reviewGroupPeriodDisplay(group, date))}</span>
+        <label class="date-calendar-button" aria-label="选择时间">
+          <span aria-hidden="true">▦</span>
+          <input type="${scopePickerType(scope)}" value="${escapeAttr(scopePickerValue(scope, date))}" data-action="set-review-group-date" data-review-group-id="${escapeAttr(group.id)}" />
+        </label>
+        <button class="date-arrow" type="button" data-action="shift-review-group-date" data-review-group-id="${escapeAttr(group.id)}" data-direction="1" aria-label="下一个">›</button>
+      </div>
+    `;
+  }
+
+  function renderReviewGroupHistory(group) {
+    const entries = reviewGroupHistoryEntries(group);
+    return `
+      <div class="review-history-list">
+        ${
+          entries.length
+            ? entries
+                .slice(0, 12)
+                .map(
+                  (entry) => `
+                    <button class="review-history-item" type="button" data-action="set-review-group-period" data-review-group-id="${escapeAttr(group.id)}" data-period-key="${escapeAttr(entry.key)}">
+                      <strong>${escapeHtml(entry.label)}</strong>
+                      <span>${escapeHtml(entry.summary)}</span>
+                    </button>
+                  `,
+                )
+                .join("")
+            : `<p class="empty compact-empty">还没有往期内容。</p>`
+        }
+      </div>
+    `;
+  }
+
+  function reviewGroupHistoryEntries(group) {
+    const keys = new Set();
+    const promptSource =
+      group.id === "day"
+        ? state.dailyReviews || {}
+        : group.id === "week"
+          ? state.weeklyReviews || {}
+          : group.id === "month"
+            ? state.monthlyReviews || {}
+            : state.reviewPromptAnswers?.[group.id] || {};
+    Object.entries(promptSource).forEach(([key, record]) => {
+      if (reviewPromptHasText(record, reviewGroupPrompts(group))) keys.add(key);
+    });
+    Object.entries(state.reviews?.[group.id] || {}).forEach(([key, items]) => {
+      if ((items || []).some(reviewItemHasContent)) keys.add(key);
+    });
+    return Array.from(keys)
+      .sort()
+      .reverse()
+      .map((key) => {
+        const record = promptSource[key] || {};
+        const promptSummary = reviewGroupPrompts(group).map((prompt) => record[prompt.id]?.trim()).find(Boolean);
+        const itemSummary = (state.reviews?.[group.id]?.[key] || []).map((item) => normalizeReviewItem(item).phenomenon?.trim()).find(Boolean);
+        return {
+          key,
+          label: reviewGroupPeriodDisplay(group, key),
+          summary: promptSummary || itemSummary || "已记录",
+        };
+      });
   }
 
   function renderMonthlyTextField(label, field, value, key, placeholder) {
@@ -2498,7 +2704,7 @@
 
   function defaultExportItems(scope = state.activeTab) {
     if (scope === "execute") return new Set(["execute-targets"]);
-    if (scope === "review") return new Set([`review-${state.reviewScope || "day"}`]);
+    if (scope === "review") return new Set([reviewExportItemForGroup(reviewGroupById(state.reviewScope))]);
     return new Set(["record-logs", "record-summary"]);
   }
 
@@ -2514,6 +2720,10 @@
       ];
     }
     if (scope === "review") {
+      const activeGroup = reviewGroupById(state.reviewScope);
+      if (activeGroup && !["day", "week", "month"].includes(activeGroup.id)) {
+        return [["复盘", [[reviewExportItemForGroup(activeGroup), activeGroup.name, reviewGroupPeriodDisplay(activeGroup)]]]];
+      }
       const reviewItems = {
         day: [["review-day", "日复盘", scopeDisplay("day", reviewDate("day"))]],
         week: [
@@ -2540,6 +2750,7 @@
   }
 
   function exportItemName(item) {
+    if (item.startsWith("review-group:")) return reviewGroupById(item.slice("review-group:".length))?.name || "复盘";
     const names = {
       "record-logs": "今日时间记录",
       "record-location": "地点时间",
@@ -2556,6 +2767,7 @@
   }
 
   function exportItemMeta(item, scope = state.activeTab) {
+    if (item.startsWith("review-group:")) return reviewGroupPeriodDisplay(reviewGroupById(item.slice("review-group:".length)));
     if (item === "record-logs") return `${dateKey()} ${weekdayText(dateKey())}`;
     if (item === "record-summary") return recordSummaryExportMeta();
     if (item === "execute-targets") return scopeDisplay("day", dateKey());
@@ -2594,6 +2806,7 @@
 
   function hasExportData(item) {
     const day = dateKey();
+    if (item.startsWith("review-group:")) return hasReviewGroupExportData(reviewGroupById(item.slice("review-group:".length)));
     if (item === "record-logs") return hasRecordLogExportData(day);
     if (item === "record-location") return locationEntriesForDate(day, locationRecordsForDate(day)).some((entry) => entry.type && (entry.start || entry.end));
     if (item === "record-summary") return hasRecordSummaryExportData();
@@ -2605,6 +2818,18 @@
     if (item === "review-month-green") return hasMonthlyLightExportData("green", reviewDate("month"));
     if (item === "review-month-summary") return hasMonthlySummaryExportData(reviewDate("month"));
     return false;
+  }
+
+  function reviewExportItemForGroup(group) {
+    if (!group) return "review-day";
+    return ["day", "week", "month"].includes(group.id) ? `review-${group.id}` : `review-group:${group.id}`;
+  }
+
+  function hasReviewGroupExportData(group) {
+    if (!group) return false;
+    const key = reviewGroupPeriodKey(group);
+    const review = reviewPromptRecordForGroup(group, key);
+    return reviewPromptHasText(review, reviewGroupPrompts(group)) || reviewItemsForExport(group.id, reviewGroupDate(group)).some(reviewItemHasContent);
   }
 
   function hasRecordLogExportData(day = dateKey()) {
@@ -2638,8 +2863,9 @@
     );
   }
 
-  function reviewPromptHasText(review) {
-    return REVIEW_PROMPT_FIELDS.some((field) => review?.[field]?.trim());
+  function reviewPromptHasText(review, prompts = null) {
+    const fields = prompts?.length ? prompts.map((prompt) => prompt.id) : REVIEW_PROMPT_FIELDS;
+    return fields.some((field) => review?.[field]?.trim());
   }
 
   function dailyReviewHasText(review) {
@@ -4321,11 +4547,18 @@
   function renderExportItem(item) {
     const cloned = cloneExportSource(item);
     if (cloned) return cloned.outerHTML;
-    if (!item.startsWith("record-")) return "";
+    if (item.startsWith("review-group:")) return renderReviewGroupExport(reviewGroupById(item.slice("review-group:".length)));
     const renderers = {
       "record-logs": renderRecordLogsExport,
       "record-location": renderRecordLocationExport,
       "record-summary": renderRecordSummaryExport,
+      "execute-targets": renderTargetsExport,
+      "review-day": renderDayReviewExport,
+      "review-week": renderWeekReviewExport,
+      "review-month": renderMonthReviewExport,
+      "review-month-red": () => renderMonthLightExport("red"),
+      "review-month-green": () => renderMonthLightExport("green"),
+      "review-month-summary": renderMonthSummaryExport,
     };
     return renderers[item]?.() || "";
   }
@@ -4686,6 +4919,40 @@
     `;
   }
 
+  function renderReviewGroupExport(group) {
+    if (!group || !hasReviewGroupExportData(group)) return "";
+    const date = reviewGroupDate(group);
+    const key = reviewGroupPeriodKey(group, date);
+    const review = reviewPromptRecordForGroup(group, key);
+    const reviewItems = reviewItemsForExport(group.id, date).filter(reviewItemHasContent);
+    return `
+      <section class="section-band review-scope-section export-block" data-review-scope="${escapeAttr(group.id)}">
+        <div class="section-title"><div><h2>${escapeHtml(reviewPeriodTitle(group, date))}</h2><p class="hint">${escapeHtml(reviewGroupPeriodDisplay(group, date))}</p></div></div>
+        ${renderReviewPromptStaticForGroup(group, review)}
+        <div class="review-stack">
+          ${reviewItems.map((item, index) => renderReviewItemExport(item, index, group.id)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderReviewPromptStaticForGroup(group, review) {
+    const cards = reviewGroupPrompts(group)
+      .map((prompt) => {
+        const value = review?.[prompt.id]?.trim() || "";
+        if (!value) return "";
+        const tone = bulletToneForField(prompt.id, prompt.tone);
+        return `
+          <section class="weekly-next-card review-prompt-static ${tone}">
+            <div class="weekly-card-title"><i class="weekly-icon ${tone}"></i><strong>${escapeHtml(prompt.label)}</strong></div>
+            <p class="review-text">${escapeMultiline(value)}</p>
+          </section>
+        `;
+      })
+      .join("");
+    return cards ? `<div class="review-prompt-static-stack">${cards}</div>` : "";
+  }
+
   function renderWeeklyReviewStatic(review) {
     const reflectionCards = [
       review.red?.trim() ? renderWeeklyReflectionCard("red", "红灯", "本周感到挫败和消耗能量的事", review.red) : "",
@@ -5006,6 +5273,18 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.8": {
+        updatedAt: "2026-09-24",
+        items: [
+          "复盘页去掉固定日/周/月顶部切换，改为标题附近的复盘组标签；默认保留日复盘、周复盘、月复盘，也支持新建自定义复盘组。",
+          "复盘组支持选择日/周/月时间粒度、编辑默认提问、调整标签顺序；这些管理入口只在复盘页右上角进入编辑状态后显示。",
+          "当前复盘组的日期切换直接显示在内容顶部，并支持查看往期复盘列表，点击往期条目可快速切回对应日期、周或月份。",
+          "复盘内容标题改为按时间命名，例如“9月24日复盘”“9月第4周复盘”“9月复盘”，避免重复显示组名。",
+          "模板问题区压缩为“记录”入口，有内容时自动展开；仍保留原来的新增现象、原因和措施结构。",
+          "删去执行页习惯打卡展示和习惯导出入口，复盘页新增“发生了什么、取得的进展、幸运的事情、渴望的事情”等常驻记录字段。",
+          "优化学习时间统计和复盘导出：记录汇总导出优先使用当前图表画面，自定义复盘组也可作为当前复盘内容导出。",
+        ],
+      },
       "v1.7": {
         updatedAt: "2026-07-08",
         items: [
@@ -5997,6 +6276,70 @@
     };
   }
 
+  function openReviewGroupModal(existingGroup = null) {
+    const group = existingGroup || {
+      id: uid(),
+      name: "新复盘组",
+      scope: "day",
+      builtIn: false,
+      prompts: normalizeReviewPrompts([], "day"),
+    };
+    openModal(
+      existingGroup ? "复盘组设置" : "新建复盘组",
+      `
+        <label class="form-row">
+          <span class="field-label">组名</span>
+          <input id="review-group-name" value="${escapeAttr(group.name || "")}" placeholder="例如：科研复盘" />
+        </label>
+        <label class="form-row">
+          <span class="field-label">时间</span>
+          <select id="review-group-scope">
+            ${["day", "week", "month"].map((scope) => `<option value="${scope}" ${group.scope === scope ? "selected" : ""}>${scopeSwitchLabel(scope)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="form-row">
+          <span class="field-label">默认提问</span>
+          <textarea id="review-group-prompts" rows="5" placeholder="每行一个问题">${escapeHtml(reviewGroupPrompts(group).map((prompt) => prompt.label).join("\n"))}</textarea>
+        </label>
+        <div class="button-row">
+          ${existingGroup && !existingGroup.builtIn ? `<button class="danger-button" type="button" data-modal-action="delete-review-group">删除</button>` : ""}
+          <button class="primary-button" type="button" data-modal-action="save-review-group">保存</button>
+        </div>
+      `,
+      (backdrop) => {
+        backdrop.addEventListener("click", (event) => {
+          if (event.target.dataset.modalAction === "delete-review-group") {
+            confirmDelete("确认要删除这个复盘组吗？", () => {
+              deleteReviewGroup(group.id);
+              closeModal();
+            });
+            return;
+          }
+          if (event.target.dataset.modalAction !== "save-review-group") return;
+          const name = $("#review-group-name", backdrop).value.trim() || "新复盘组";
+          const scope = $("#review-group-scope", backdrop).value;
+          const lines = $("#review-group-prompts", backdrop).value.split("\n").map((line) => line.trim()).filter(Boolean);
+          const fallback = normalizeReviewPrompts([], scope);
+          const prompts = (lines.length ? lines : fallback.map((prompt) => prompt.label)).map((label, index) => ({
+            id: group.prompts?.[index]?.id || REVIEW_PROMPT_FIELDS[index] || `prompt-${index + 1}`,
+            label,
+            tone: group.prompts?.[index]?.tone || fallback[index]?.tone || ["blue", "green", "amber", "red"][index % 4],
+          }));
+          setState((draft) => {
+            draft.settings.reviewGroups = normalizeReviewGroups(draft.settings.reviewGroups);
+            const index = draft.settings.reviewGroups.findIndex((item) => item.id === group.id);
+            const nextGroup = { ...group, name, scope, prompts };
+            if (index >= 0) draft.settings.reviewGroups[index] = { ...draft.settings.reviewGroups[index], ...nextGroup };
+            else draft.settings.reviewGroups.push(nextGroup);
+            draft.settings.reviewGroups = normalizeReviewGroups(draft.settings.reviewGroups);
+            draft.reviewScope = group.id;
+          });
+          closeModal();
+        });
+      },
+    );
+  }
+
   function openHabitModal(existingHabit = null) {
     const currentValue = existingHabit?.records?.[dateKey()] ?? 0;
     const currentColor = existingHabit?.color || colors[0];
@@ -6198,6 +6541,14 @@
     if (action === "set-review-scope") return setState((draft) => (draft.reviewScope = actionNode.dataset.scope));
     if (action === "set-month-review-mode") return setMonthReviewMode(actionNode.dataset.mode);
     if (action === "toggle-key-event-detail") return toggleKeyEventDetail(actionNode.dataset.keyEventId);
+    if (action === "toggle-review-group-edit") return toggleReviewGroupEditing();
+    if (action === "set-active-review-group") return setActiveReviewGroup(actionNode.dataset.reviewGroupId);
+    if (action === "toggle-review-history") return toggleReviewHistory(actionNode.dataset.reviewGroupId);
+    if (action === "move-review-group") return moveReviewGroup(actionNode.dataset.reviewGroupId, Number(actionNode.dataset.direction));
+    if (action === "add-review-group") return openReviewGroupModal();
+    if (action === "edit-review-group") return openReviewGroupModal(reviewGroupById(actionNode.dataset.reviewGroupId));
+    if (action === "set-review-group-period") return setReviewGroupPeriod(actionNode.dataset.reviewGroupId, actionNode.dataset.periodKey);
+    if (action === "shift-review-group-date") return shiftReviewGroupDate(actionNode.dataset.reviewGroupId, Number(actionNode.dataset.direction) || 0);
     if (action === "shift-review-date") return shiftReviewDate(actionNode.dataset.reviewScope, Number(actionNode.dataset.direction) || 0);
     if (action === "open-export") return openExportModal(actionNode.dataset.exportScope);
     if (action === "add-plan") return openPlanModal();
@@ -6226,6 +6577,7 @@
     if (action === "update-habit") updateHabit(actionNode.closest("[data-habit-id]").dataset.habitId, actionNode.value, actionNode, false);
     if (action === "update-review-item") updateReviewItem(reviewScopeFromNode(actionNode), actionNode.closest("[data-review-id]").dataset.reviewId, actionNode.dataset.field, actionNode.value);
     if (action === "update-review-reason") updateReviewReason(reviewScopeFromNode(actionNode), actionNode.dataset.reviewId, actionNode.dataset.reasonId, actionNode.dataset.field, actionNode.value);
+    if (action === "update-review-prompt") updateReviewPromptField(actionNode.dataset.reviewGroupId, actionNode.dataset.reviewPeriodKey, actionNode.dataset.field, actionNode.value);
     if (action === "update-day-review") updateDailyReviewField(actionNode.dataset.dayReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "update-week-review") updateWeeklyReviewField(actionNode.dataset.weeklyReviewKey, actionNode.dataset.field, actionNode.value);
     if (action === "update-month-review") updateMonthlyReviewField(actionNode.dataset.monthReviewKey, actionNode.dataset.field, actionNode.value);
@@ -6270,6 +6622,9 @@
     }
     if (actionNode.dataset.action === "set-review-scope-date") {
       setReviewScopeDate(actionNode.dataset.reviewScope, actionNode.value);
+    }
+    if (actionNode.dataset.action === "set-review-group-date") {
+      setReviewGroupDate(actionNode.dataset.reviewGroupId, actionNode.value);
     }
   });
 
@@ -6681,6 +7036,81 @@
     render();
   }
 
+  function toggleReviewGroupEditing() {
+    ui.reviewGroupEditing = !ui.reviewGroupEditing;
+    render();
+  }
+
+  function setActiveReviewGroup(groupId) {
+    const group = reviewGroupById(groupId);
+    if (!group) return;
+    ui.openReviewHistoryGroup = "";
+    setState((draft) => {
+      draft.reviewScope = group.id;
+    });
+  }
+
+  function toggleReviewHistory(groupId) {
+    ui.openReviewHistoryGroup = ui.openReviewHistoryGroup === groupId ? "" : groupId;
+    render();
+  }
+
+  function moveReviewGroup(groupId, direction) {
+    setState((draft) => {
+      draft.settings.reviewGroups = normalizeReviewGroups(draft.settings.reviewGroups);
+      moveInListById(draft.settings.reviewGroups, groupId, direction);
+    });
+  }
+
+  function deleteReviewGroup(groupId) {
+    const group = reviewGroupById(groupId);
+    if (!group || group.builtIn) return;
+    if (ui.openReviewHistoryGroup === groupId) ui.openReviewHistoryGroup = "";
+    setState((draft) => {
+      draft.settings.reviewGroups = normalizeReviewGroups(draft.settings.reviewGroups).filter((item) => item.id !== groupId);
+      delete draft.reviews?.[groupId];
+      delete draft.reviewPromptAnswers?.[groupId];
+      delete draft.reviewDates?.[groupId];
+    });
+  }
+
+  function setReviewGroupDate(groupId, value) {
+    const group = reviewGroupById(groupId);
+    const nextDate = normalizeScopePickerValue(group?.scope || "day", value);
+    if (!group || !nextDate) return;
+    setState((draft) => {
+      draft.reviewDates ||= {};
+      draft.reviewDates[group.id] = nextDate;
+      if (group.builtIn) draft.reviewDates[group.scope] = nextDate;
+    });
+  }
+
+  function setReviewGroupPeriod(groupId, periodKey) {
+    const group = reviewGroupById(groupId);
+    const nextDate = normalizeDateKey(periodKey);
+    if (!group || !nextDate) return;
+    ui.openReviewHistoryGroup = "";
+    setState((draft) => {
+      draft.reviewDates ||= {};
+      draft.reviewDates[group.id] = nextDate;
+      if (group.builtIn) draft.reviewDates[group.scope] = nextDate;
+    });
+  }
+
+  function shiftReviewGroupDate(groupId, direction) {
+    const group = reviewGroupById(groupId);
+    if (!group) return;
+    const current = new Date(`${reviewGroupDate(group)}T00:00:00`);
+    if (group.scope === "day") current.setDate(current.getDate() + direction);
+    if (group.scope === "week") current.setDate(current.getDate() + direction * 7);
+    if (group.scope === "month") current.setMonth(current.getMonth() + direction);
+    setState((draft) => {
+      draft.reviewDates ||= {};
+      draft.reviewDates[group.id] = isoFromDate(current);
+      if (group.builtIn) draft.reviewDates[group.scope] = isoFromDate(current);
+    });
+  }
+
   function toggleKeyEventDetail(key) {
     if (!key) return;
     if (ui.expandedKeyEvents.has(key)) ui.expandedKeyEvents.delete(key);
@@ -6970,7 +7400,7 @@
     const id = uid();
     ui.editingReviews.add(id);
     setState((draft) => {
-      const list = reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope)));
+      const list = reviewsForScopeDraft(draft, scope, reviewPeriodKeyForScope(scope, reviewDate(scope)));
       list.push({ id, phenomenon: "", starred: false, reasons: [{ id: uid(), text: "", measure: "" }] });
     });
   }
@@ -7025,6 +7455,15 @@
     saveState();
   }
 
+  function updateReviewPromptField(groupId, key, field, value) {
+    const group = reviewGroupById(groupId);
+    if (!group || !reviewGroupPrompts(group).some((prompt) => prompt.id === field)) return;
+    const periodKey = key || reviewGroupPeriodKey(group);
+    const review = reviewPromptRecordForGroup(group, periodKey);
+    review[field] = normalizeBulletTextareaValue(value);
+    saveState();
+  }
+
   function updateWeeklyReviewField(key, field, value) {
     if (![...REVIEW_PROMPT_FIELDS, "red", "green", "summary", "nextDirection"].includes(field)) return;
     const review = weeklyReviewForKey(key || scopeKey("week", reviewDate("week")));
@@ -7050,7 +7489,7 @@
 
   function deleteReviewItem(scope, itemId) {
     setState((draft) => {
-      const list = reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope)));
+      const list = reviewsForScopeDraft(draft, scope, reviewPeriodKeyForScope(scope, reviewDate(scope)));
       const index = list.findIndex((review) => review.id === itemId);
       if (index >= 0) list.splice(index, 1);
     });
@@ -7093,7 +7532,7 @@
 
   function moveReviewItem(scope, itemId, direction) {
     setState((draft) => {
-      moveInListById(reviewsForScopeDraft(draft, scope, scopeKey(scope, reviewDate(scope))), itemId, direction);
+      moveInListById(reviewsForScopeDraft(draft, scope, reviewPeriodKeyForScope(scope, reviewDate(scope))), itemId, direction);
     });
   }
 
@@ -7266,7 +7705,10 @@
   }
 
   function normalizeDailyReview(review = {}) {
-    return normalizeReviewPromptRecord(review);
+    return {
+      ...review,
+      ...normalizeReviewPromptRecord(review),
+    };
   }
 
   function weeklyReviewForKey(key) {
@@ -7281,6 +7723,7 @@
 
   function normalizeWeeklyReview(review = {}) {
     return {
+      ...review,
       ...normalizeReviewPromptRecord(review),
       red: review.red || "",
       green: review.green || "",
@@ -7297,6 +7740,7 @@
 
   function normalizeMonthlyReview(review = {}) {
     return {
+      ...review,
       ...normalizeReviewPromptRecord(review),
       redInsight: review.redInsight || review.red || "",
       greenInsight: review.greenInsight || review.green || "",
@@ -7312,6 +7756,51 @@
       lucky: review.lucky || review.luck || "",
       desire: review.desire || review.wish || review.craving || "",
     };
+  }
+
+  function normalizeReviewGroups(groups = []) {
+    const source = Array.isArray(groups) && groups.length ? groups : DEFAULT_REVIEW_GROUPS;
+    const normalized = source
+      .map((group, index) => normalizeReviewGroup(group, index))
+      .filter(Boolean);
+    DEFAULT_REVIEW_GROUPS.forEach((defaultGroup) => {
+      const index = normalized.findIndex((group) => group.id === defaultGroup.id);
+      if (index >= 0) normalized[index] = { ...defaultGroup, ...normalized[index], builtIn: true, prompts: normalizeReviewPrompts(normalized[index].prompts, defaultGroup.scope) };
+      else normalized.push(structuredClone(defaultGroup));
+    });
+    return normalized;
+  }
+
+  function normalizeReviewGroup(group, index = 0) {
+    if (!group || typeof group !== "object") return null;
+    const defaultGroup = DEFAULT_REVIEW_GROUPS.find((item) => item.id === group.id);
+    const scope = ["day", "week", "month"].includes(group.scope) ? group.scope : defaultGroup?.scope || "day";
+    const id = String(group.id || `review-group-${index + 1}`).trim() || `review-group-${index + 1}`;
+    return {
+      id,
+      name: String(group.name || defaultGroup?.name || "新复盘组").trim() || "新复盘组",
+      scope,
+      builtIn: Boolean(defaultGroup || group.builtIn),
+      prompts: normalizeReviewPrompts(group.prompts || defaultGroup?.prompts, scope),
+    };
+  }
+
+  function normalizeReviewPrompts(prompts = [], scope = "day") {
+    const fallback = DEFAULT_REVIEW_GROUPS.find((group) => group.scope === scope)?.prompts || DEFAULT_REVIEW_GROUPS[0].prompts;
+    const source = Array.isArray(prompts) && prompts.length ? prompts : fallback;
+    return source
+      .map((prompt, index) => {
+        const fallbackPrompt = fallback[index] || fallback[0];
+        const id = String(prompt?.id || REVIEW_PROMPT_FIELDS[index] || `prompt-${index + 1}`).trim() || `prompt-${index + 1}`;
+        const label = String(prompt?.label || fallbackPrompt?.label || "想记录的事情").trim();
+        if (!label) return null;
+        return {
+          id,
+          label,
+          tone: ["blue", "green", "amber", "red"].includes(prompt?.tone) ? prompt.tone : fallbackPrompt?.tone || "blue",
+        };
+      })
+      .filter(Boolean);
   }
 
   function weeklyStudySummary(date) {
@@ -7708,7 +8197,7 @@
     return { day: "日复盘", week: "周复盘", month: "月复盘" }[scope];
   }
 
-  function bulletToneForField(field) {
+  function bulletToneForField(field, fallback = "blue") {
     return {
       happened: "blue",
       progress: "green",
@@ -7718,14 +8207,14 @@
       greenInsight: "green",
       summary: "amber",
       nextDirection: "blue",
-    }[field] || "blue";
+    }[field] || fallback || "blue";
   }
 
-  function renderBulletTextarea({ tone, value = "", action, keyName, key, field, placeholder }) {
+  function renderBulletTextarea({ tone, value = "", action, keyName, key, field, placeholder, extraAttrs = "" }) {
     return `
       <div class="bullet-textarea-wrap bullet-${tone}">
         <div class="bullet-line-layer" aria-hidden="true">${renderBulletMarkers(value)}</div>
-        <textarea class="bullet-textarea" rows="${textareaRows(value)}" data-action="${escapeAttr(action)}" ${keyName}="${escapeAttr(key)}" data-field="${escapeAttr(field)}" placeholder="">${escapeHtml(value || "")}</textarea>
+        <textarea class="bullet-textarea" rows="${textareaRows(value)}" data-action="${escapeAttr(action)}" ${keyName}="${escapeAttr(key)}" data-field="${escapeAttr(field)}" ${extraAttrs} placeholder="">${escapeHtml(value || "")}</textarea>
       </div>
     `;
   }

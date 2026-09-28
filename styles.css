@@ -336,6 +336,19 @@ textarea:focus {
   font-weight: 780;
 }
 
+.review-period-heading {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.review-weekday-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 780;
+}
+
 .hint {
   margin: 4px 0 0;
   color: var(--muted);
@@ -367,6 +380,13 @@ textarea:focus {
 
 .record-efficiency-band {
   padding: 10px 12px;
+}
+
+.record-efficiency-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.64fr) minmax(280px, 1fr);
+  gap: 10px;
+  align-items: start;
 }
 
 .record-with-axis {
@@ -1196,6 +1216,11 @@ textarea:focus {
   font-size: 16px;
 }
 
+.task-title span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .task-title-line {
   display: flex;
   align-items: center;
@@ -1210,6 +1235,15 @@ textarea:focus {
 
 .task-title-line .row-actions {
   margin-left: auto;
+}
+
+.task-title-actions {
+  align-self: flex-start;
+  flex-wrap: nowrap;
+}
+
+.task-title-actions .count-text {
+  white-space: nowrap;
 }
 
 .task-meta {
@@ -1372,6 +1406,106 @@ textarea:focus {
   min-height: 38px;
 }
 
+.transaction-stack {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.transaction-panel {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 10px 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.transaction-panel.done {
+  background: color-mix(in srgb, var(--soft) 42%, #fff);
+}
+
+.transaction-accent {
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+}
+
+.transaction-main,
+.transaction-right,
+.transaction-week,
+.transaction-actions {
+  display: flex;
+  align-items: center;
+}
+
+.transaction-main {
+  min-width: 0;
+  gap: 8px;
+}
+
+.transaction-check {
+  display: inline-flex;
+  align-items: center;
+}
+
+.transaction-copy {
+  min-width: 0;
+}
+
+.transaction-copy h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.transaction-copy p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.transaction-right {
+  justify-content: flex-end;
+  gap: 8px;
+  align-self: start;
+  padding-top: 1px;
+}
+
+.transaction-week {
+  gap: 5px;
+}
+
+.transaction-actions {
+  gap: 6px;
+}
+
+.transaction-dot {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--transaction-color);
+  border-radius: 50%;
+  background: #fff;
+}
+
+.transaction-dot.small {
+  width: 14px;
+  height: 14px;
+}
+
+.transaction-dot.done {
+  background: var(--transaction-color);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
 .habit-orb {
   display: inline-grid;
   width: var(--habit-size);
@@ -1486,11 +1620,62 @@ textarea:focus {
 
 .calendar {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
 }
 
 .calendar-header {
   justify-content: space-between;
+}
+
+.completion-calendar-header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+}
+
+.completion-calendar-header strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 850;
+  text-align: center;
+}
+
+.calendar-nav-button {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.calendar-nav-button:hover {
+  border-color: rgba(47, 111, 115, 0.24);
+  color: var(--accent);
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.calendar-weekdays span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-align: center;
 }
 
 .calendar-grid {
@@ -1500,18 +1685,60 @@ textarea:focus {
 }
 
 .calendar-cell {
+  position: relative;
   display: grid;
-  min-height: 38px;
+  aspect-ratio: 1 / 1;
+  min-height: 0;
   place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: #fff;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 14px;
+  font-weight: 780;
 }
 
 .calendar-cell.muted {
-  opacity: 0.35;
+  border-color: transparent;
+  background: transparent;
+  opacity: 0;
+}
+
+.calendar-cell.today {
+  border-color: rgba(47, 111, 115, 0.28);
+  background: color-mix(in srgb, var(--soft) 58%, transparent);
+  color: var(--ink);
+}
+
+.calendar-cell.selected {
+  border-color: rgba(47, 111, 115, 0.46);
+  background: color-mix(in srgb, var(--soft) 70%, transparent);
+  color: var(--ink);
+}
+
+.calendar-cell[data-action="select-review-history-date"] {
+  cursor: pointer;
+}
+
+.calendar-completion-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--calendar-dot-color, var(--accent));
+}
+
+.transaction-calendar-cell,
+.review-history-calendar-cell {
+  min-height: 0;
+}
+
+.transaction-calendar-cell.done,
+.review-history-calendar-cell.done {
+  background: transparent;
 }
 
 .plans-list {
@@ -1548,9 +1775,9 @@ textarea:focus {
 
 .review-group-toolbar {
   display: grid;
-  gap: 8px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  gap: 7px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .review-group-title-line {
@@ -1558,6 +1785,13 @@ textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.review-group-title-line h2 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 850;
 }
 
 .review-group-tabs {
@@ -1612,6 +1846,38 @@ textarea:focus {
   gap: 10px;
 }
 
+.review-history-panel,
+.related-review-history {
+  display: grid;
+  gap: 8px;
+}
+
+.review-history-selected {
+  display: grid;
+  gap: 6px;
+}
+
+.review-history-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review-history-controls > span {
+  flex: 1 1 auto;
+}
+
+.review-history-more {
+  flex: 1 1 auto;
+  min-height: 34px;
+}
+
+.review-history-collapse {
+  flex: 0 0 auto;
+  min-height: 34px;
+}
+
 .review-history-list {
   display: grid;
   gap: 6px;
@@ -1622,9 +1888,20 @@ textarea:focus {
   background: #fbfcfa;
 }
 
+.related-review-history .review-history-list,
+.review-history-list.compact {
+  margin-top: 0;
+  padding: 6px;
+}
+
+.review-history-entry {
+  display: grid;
+  gap: 4px;
+}
+
 .review-history-item {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr) 18px;
   gap: 8px;
   align-items: center;
   padding: 7px 8px;
@@ -1651,6 +1928,67 @@ textarea:focus {
   font-weight: 720;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.review-history-item i {
+  color: var(--muted);
+  font-style: normal;
+  text-align: right;
+}
+
+.review-history-preview {
+  display: grid;
+  gap: 8px;
+  padding: 6px 8px 8px 104px;
+}
+
+.review-history-preview-block {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.review-history-preview-block > strong {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.review-history-preview-block p,
+.review-history-preview-block ol {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.review-history-preview-block ol {
+  display: grid;
+  gap: 2px;
+  padding-left: 18px;
+}
+
+.review-history-calendar {
+  margin-top: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcfa;
+}
+
+.review-history-calendar-cell {
+  min-height: 0;
+}
+
+.review-history-calendar-cell.done {
+  background: #fff;
+  color: var(--ink);
+}
+
+.review-history-month-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .weekly-review-section {
@@ -2527,6 +2865,7 @@ button.review-star {
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  min-height: 42px;
   padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -2558,6 +2897,75 @@ button.review-star {
 
 .holiday-efficiency-strip span {
   justify-self: end;
+}
+
+.efficiency-calendar {
+  gap: 8px;
+  padding: 8px;
+  background: #fbfcfa;
+}
+
+.efficiency-calendar-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.efficiency-calendar-header strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.efficiency-calendar-header span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.efficiency-calendar-grid {
+  gap: 4px;
+}
+
+.efficiency-calendar-cell {
+  align-content: center;
+  gap: 1px;
+  aspect-ratio: 1 / 1.04;
+  padding: 3px 2px;
+  place-items: center;
+}
+
+.efficiency-calendar-day {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 820;
+  line-height: 1;
+}
+
+.efficiency-calendar-values {
+  display: grid;
+  gap: 1px;
+  justify-items: center;
+  line-height: 1.05;
+}
+
+.efficiency-calendar-value {
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.efficiency-calendar-value.met {
+  color: #4d8b57;
+}
+
+.efficiency-calendar-value.miss {
+  color: #b35d4a;
+}
+
+.efficiency-calendar-value.unset {
+  color: #9aa09a;
 }
 
 .holiday-inline-badge {
@@ -3098,6 +3506,7 @@ button.review-star {
 }
 
 .review-export-sheet .button-row,
+.review-export-sheet .task-title-actions,
 .review-export-sheet .icon-button,
 .review-export-sheet .secondary-button,
 .review-export-sheet .primary-button,
@@ -3512,6 +3921,22 @@ button.review-star {
     text-align: center;
   }
 
+  .record-efficiency-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .efficiency-calendar {
+    padding: 7px;
+  }
+
+  .efficiency-calendar-cell {
+    min-height: 42px;
+  }
+
+  .efficiency-calendar-value {
+    font-size: 8.5px;
+  }
+
   .today-summary .section-title {
     align-items: stretch;
     flex-direction: column;
@@ -3814,6 +4239,40 @@ button.review-star {
     gap: 8px;
   }
 
+  .transaction-panel {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .transaction-right {
+    justify-content: flex-end;
+    width: auto;
+    gap: 6px;
+  }
+
+  .transaction-week {
+    gap: 4px;
+  }
+
+  .transaction-dot.small {
+    width: 11px;
+    height: 11px;
+    border-width: 1.3px;
+  }
+
+  .review-history-item {
+    grid-template-columns: 78px minmax(0, 1fr) 16px;
+    padding: 6px;
+  }
+
+  .review-history-preview {
+    padding-left: 6px;
+  }
+
+  .review-history-month-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .habit-right-line {
     display: grid;
     justify-items: end;
@@ -4035,7 +4494,8 @@ button.review-star {
   }
 
   .calendar-cell {
-    min-height: 34px;
-    font-size: 11px;
+    min-height: 0;
+    padding: 0;
+    font-size: 13px;
   }
 }

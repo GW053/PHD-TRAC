@@ -1082,7 +1082,8 @@ textarea:focus {
 }
 
 .target-filter-band {
-  padding: 10px;
+  margin-top: 8px;
+  padding: 0;
 }
 
 .target-tag-tabs {
@@ -1115,6 +1116,10 @@ textarea:focus {
   font-weight: 760;
 }
 
+.transaction-group-tabs {
+  margin-top: 8px;
+}
+
 .target-tag-editor-list {
   display: grid;
   gap: 8px;
@@ -1125,6 +1130,10 @@ textarea:focus {
   grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.transaction-group-row {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .target-default-radio {
@@ -2928,26 +2937,38 @@ button.review-star {
   gap: 4px;
 }
 
-.efficiency-calendar-cell {
-  align-content: center;
-  gap: 1px;
-  aspect-ratio: 1 / 1.04;
-  padding: 3px 2px;
-  place-items: center;
+.calendar-cell.efficiency-calendar-cell {
+  display: flex;
+  aspect-ratio: 1 / 1;
+  min-height: 50px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 5px 2px 4px;
+  text-align: center;
 }
 
 .efficiency-calendar-day {
+  display: block;
+  width: 100%;
   color: var(--ink);
-  font-size: 12px;
-  font-weight: 820;
+  font-size: 15px;
+  font-weight: 860;
   line-height: 1;
 }
 
 .efficiency-calendar-values {
   display: grid;
-  gap: 1px;
+  min-height: 20px;
+  align-content: start;
+  gap: 2px;
   justify-items: center;
   line-height: 1.05;
+}
+
+.efficiency-calendar-values:empty {
+  display: none;
 }
 
 .efficiency-calendar-value {
@@ -3929,8 +3950,9 @@ button.review-star {
     padding: 7px;
   }
 
-  .efficiency-calendar-cell {
-    min-height: 42px;
+  .calendar-cell.efficiency-calendar-cell {
+    min-height: 50px;
+    padding: 5px 2px 4px;
   }
 
   .efficiency-calendar-value {

@@ -6,8 +6,8 @@
   const SUPABASE_TABLE = "phd_trac_records";
   const SLEEP_SOURCE_TABLE = "daily_record_sync";
   const SLEEP_STAT_KEY = "__sleep";
-  const APP_VERSION = "v1.8";
-  const VERSION_UPDATED_AT = "2026-09-28";
+  const APP_VERSION = "v1.9";
+  const VERSION_UPDATED_AT = "2026-10-05";
   const colors = ["#2f6f73", "#b35d4a", "#8a7b35", "#5d6f9f", "#7d5f89", "#4d7d4d", "#a55567", "#69724d"];
   const defaultLocationTypes = [
     { id: "outdoor", name: "户外", color: "#d8b74e" },
@@ -15,6 +15,7 @@
     { id: "dorm", name: "宿舍", color: "#4d8b57" },
   ];
   const DEFAULT_LOCATION_ID = "outdoor";
+  const TRANSACTION_UNCATEGORIZED = "未分类";
   const REVIEW_PROMPT_FIELDS = ["happened", "progress", "lucky", "desire"];
   const DEFAULT_REVIEW_GROUPS = [
     {
@@ -90,6 +91,7 @@
       plans: ["提升文献阅读能力", "锻炼英语口语能力", "基础知识复习"],
       targetTags: ["未分类"],
       targetDefaultTag: "未分类",
+      transactionGroups: [TRANSACTION_UNCATEGORIZED],
       locations: { work: [], dorm: [] },
       locationTypes: defaultLocationTypes,
       defaultLocationId: DEFAULT_LOCATION_ID,
@@ -137,9 +139,11 @@
     targetEditing: false,
     habitEditing: false,
     transactionEditing: false,
+    transactionFilterGroup: "__all",
     reviewEditing: false,
     plansEditing: false,
     targetFilterTag: "__all",
+    targetSectionCollapsed: false,
     collapsedTargetTags: new Set(),
     recordChartSeries: {
       work: true,
@@ -192,6 +196,11 @@
     repairReviewPromptAnswerDrift(normalized, storedReviewGroups, normalized.settings.reviewGroups);
     normalized.settings.targetTags = targetTagListFromState(normalized);
     normalized.settings.targetDefaultTag = normalizedTargetDefaultTag(normalized.settings.targetDefaultTag, normalized.settings.targetTags);
+    normalized.settings.transactionGroups = normalizeTransactionGroups(normalized.settings.transactionGroups);
+    normalized.settings.transactionGroups = normalizeTransactionGroups([
+      ...normalized.settings.transactionGroups,
+      ...normalized.transactions.map((item) => transactionGroup(item)),
+    ]);
     normalized.settings.locationTypes = normalizeLocationTypes(normalized.settings.locationTypes);
     normalized.settings.defaultLocationId = normalizeLocationId(normalized.settings.defaultLocationId, normalized.settings.locationTypes);
     normalized.settings.expectedStudyHours = normalizedExpectedHours(normalized.settings.expectedStudyHours);
@@ -256,6 +265,7 @@
         tags: mergeById(remote.settings.tags || [], local.settings.tags || []),
         plans: mergeTextList(remote.settings.plans || [], local.settings.plans || []),
         targetTags: mergeTextList(remote.settings.targetTags || [], local.settings.targetTags || []),
+        transactionGroups: mergeTextList(remote.settings.transactionGroups || [], local.settings.transactionGroups || []),
         locationTypes: mergeLocationTypes(remote.settings.locationTypes || [], local.settings.locationTypes || []),
         reviewGroups: mergeReviewGroups(remote.settings.reviewGroups || [], local.settings.reviewGroups || []),
         defaultLocationId: local.settings.defaultLocationId || remote.settings.defaultLocationId || DEFAULT_LOCATION_ID,
@@ -1636,6 +1646,7 @@
   }
 
   function renderEfficiencyCalendarValue(type, minutes, expectedHours, date) {
+    if (!minutes) return "";
     const expectedMinutes = Math.max(0, Number(expectedHours) || 0) * 60;
     const future = normalizeDateKey(date) > todayIso();
     const status = !expectedMinutes || future ? "unset" : minutes >= expectedMinutes ? "met" : "miss";
@@ -1653,9 +1664,9 @@
     const targetTags = targetTagList(targets);
     if (ui.targetFilterTag !== "__all" && !targetTags.includes(ui.targetFilterTag)) ui.targetFilterTag = "__all";
     const visibleTargets = targetsForActiveTag(targets).sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b)));
+    const targetSectionCollapsed = Boolean(targets.length && ui.targetSectionCollapsed);
     $("#app").innerHTML = `
       <section class="view" data-view="execute">
-        ${renderTargetTagBar(targetTags)}
         <section class="section-band target-section">
           <div class="section-title">
             <div>
@@ -1663,14 +1674,14 @@
               <p class="hint">${scopeDisplay(state.targetScope)}</p>
             </div>
             <div class="button-row">
+              ${targets.length ? `<button class="secondary-button" type="button" data-action="collapse-targets">${targetSectionCollapsed ? "展开" : "收起"}</button>` : ""}
               <button class="secondary-button add-button" type="button" data-action="add-target" aria-label="新增目标">+</button>
               ${ui.targetEditing ? `<button class="secondary-button" type="button" data-action="migrate-incomplete-targets">迁移</button>` : ""}
               <button class="primary-button" type="button" data-action="toggle-target-edit">${ui.targetEditing ? "完成" : "编辑"}</button>
             </div>
           </div>
-          <div class="task-stack">
-            ${visibleTargets.length ? visibleTargets.map((target) => renderTarget(target)).join("") : renderTargetEmptyText(targets.length)}
-          </div>
+          ${!targetSectionCollapsed && (targets.length || ui.targetEditing) ? renderTargetTagBar(targetTags) : ""}
+          ${!targetSectionCollapsed && visibleTargets.length ? `<div class="task-stack">${visibleTargets.map((target) => renderTarget(target)).join("")}</div>` : ""}
         </section>
         ${renderTransactionsSection()}
       </section>
@@ -1680,39 +1691,18 @@
   function renderTargetTagBar(tags) {
     const targets = targetsForCurrentScope();
     return `
-      <section class="section-band target-filter-band">
+      <div class="target-filter-band target-filter-inline">
         <div class="target-tag-tabs">
           <button class="target-tag-chip ${ui.targetFilterTag === "__all" ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="__all">全部（${targets.length}）</button>
           ${tags.map((tag) => `<button class="target-tag-chip ${ui.targetFilterTag === tag ? "active" : ""}" type="button" data-action="set-target-filter" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}（${targetCountForTag(targets, tag)}）</button>`).join("")}
           ${ui.targetEditing ? `<button class="secondary-button target-tag-edit-button" type="button" data-action="edit-target-tags">编辑标签</button>` : ""}
         </div>
-      </section>
+      </div>
     `;
-  }
-
-  function renderTargetGroups(targets, tags) {
-    return targetsForActiveTag(targets).sort((a, b) => Number(isTaskDone(a)) - Number(isTaskDone(b))).map((target) => renderTarget(target)).join("");
   }
 
   function targetsForActiveTag(targets = targetsForCurrentScope()) {
     return ui.targetFilterTag === "__all" ? [...targets] : targets.filter((target) => targetTag(target) === ui.targetFilterTag);
-  }
-
-  function renderTargetEmptyText(allCount = targetsForCurrentScope().length) {
-    return `<p class="empty">${allCount ? "这个标签下还没有目标。" : "先添加一个目标，之后可以继续拆到二级和三级任务。"}</p>`;
-  }
-
-  function renderTargetGroup(tag, targets) {
-    const collapsed = ui.collapsedTargetTags.has(tag);
-    return `
-      <section class="target-category-group ${collapsed ? "collapsed" : ""}" data-target-tag="${escapeAttr(tag)}">
-        <button class="target-category-header" type="button" data-action="toggle-target-category" data-tag="${escapeAttr(tag)}" aria-label="展开或收起${escapeAttr(tag)}">
-          <span>${escapeHtml(tag)}（${targets.length}）</span>
-          <i>${collapsed ? "▸" : "▾"}</i>
-        </button>
-        ${collapsed ? "" : `<div class="target-category-list">${targets.length ? targets.map((target) => renderTarget(target)).join("") : `<p class="empty compact-empty">这个标签下还没有目标。</p>`}</div>`}
-      </section>
-    `;
   }
 
   function renderTarget(target) {
@@ -1853,7 +1843,10 @@
   }
 
   function renderTransactionsSection() {
-    const transactions = transactionList();
+    const allTransactions = transactionList();
+    const groups = transactionGroupList(allTransactions);
+    if (ui.transactionFilterGroup !== "__all" && !groups.includes(ui.transactionFilterGroup)) ui.transactionFilterGroup = "__all";
+    const transactions = transactionsForActiveGroup(allTransactions);
     return `
       <section class="section-band transaction-section">
         <div class="section-title">
@@ -1866,10 +1859,21 @@
             <button class="primary-button" type="button" data-action="toggle-transaction-edit">${ui.transactionEditing ? "完成" : "编辑"}</button>
           </div>
         </div>
+        ${renderTransactionGroupBar(groups, allTransactions)}
         <div class="transaction-stack">
           ${transactions.length ? transactions.map((item) => renderTransaction(item)).join("") : `<p class="empty compact-empty">还没有事务记录。</p>`}
         </div>
       </section>
+    `;
+  }
+
+  function renderTransactionGroupBar(groups, transactions) {
+    return `
+      <div class="target-tag-tabs transaction-group-tabs">
+        <button class="target-tag-chip ${ui.transactionFilterGroup === "__all" ? "active" : ""}" type="button" data-action="set-transaction-filter" data-group="__all">全部（${transactions.length}）</button>
+        ${groups.map((group) => `<button class="target-tag-chip ${ui.transactionFilterGroup === group ? "active" : ""}" type="button" data-action="set-transaction-filter" data-group="${escapeAttr(group)}">${escapeHtml(group)}（${transactionCountForGroup(transactions, group)}）</button>`).join("")}
+        ${ui.transactionEditing ? `<button class="secondary-button target-tag-edit-button" type="button" data-action="edit-transaction-groups">编辑分组</button>` : ""}
+      </div>
     `;
   }
 
@@ -4871,7 +4875,6 @@
     } else if (item === "record-summary") {
       appendClone(app.querySelector(".today-summary"));
     } else if (item === "execute-targets") {
-      appendClone(app.querySelector(".target-filter-band"));
       appendClone(app.querySelector(".target-section"));
     } else if (item === "review-day") {
       appendClone(app.querySelector('[data-review-scope="day"]'));
@@ -5553,6 +5556,16 @@
 
   function openVersionModal() {
     const versions = {
+      "v1.9": {
+        updatedAt: "2026-10-05",
+        items: [
+          "记录页移除地点时间占比统计，工位时间利用率旁新增月历视图；月历按日期展示学习/工位时长，达标为绿、不达标为红、未设置期望为灰，0h 不显示。",
+          "修正学习/工位月历的手机端排版，日期与两行时长改为稳定纵向布局，避免数字错位和空格挤压。",
+          "执行页事务记录新增分组筛选与编辑，事务可归入自定义组；分组顺序为全部、自定义组、未分类。",
+          "事务记录描述改为“上次记录 x 天前，连续 y 天”，连续天数会兼容今天尚未记录但昨天仍连续的情况。",
+          "目标标签筛选移入目标卡片内，目标为空时不再显示占位虚线框；目标栏新增整体收起/展开按钮，收起后只保留标题和操作入口。",
+        ],
+      },
       "v1.8": {
         updatedAt: "2026-09-28",
         items: [
@@ -5578,9 +5591,9 @@
           "地点记录框简化为空状态只显示地点名称和操作入口，支持地点描述、小圆点文本、事项记录和连续同地点时段合并。",
           "新增假期时间与期望学习/工位时长设置；假期不计算工位时长利用率，周复盘和月复盘会汇总显示假期信息。",
           "学习时间统计替代近七日汇总，图表支持左右滑动切换 7 日时间窗口，数值标签置顶并加背景描边，导出时同步使用当前窗口和当前勾选显示状态。",
-          "新增地点时间占比统计，记录页、周复盘和月复盘都会按当前地点顺序展示地点占比；未分配地点事项可手动归属到现有地点段。",
-          "记录页地点时间占比移动到学习时间统计上方，并固定只统计当前记录日期；记录汇总导出会同时包含当日地点占比和学习统计，今日时间记录导出会保留无事项的非户外地点段并显示具体时间段。",
-          "修复记录汇总导出在浏览器限制下退成纯文字的问题，地点时间占比兜底导出也会保留横向占比条；优化时间轴顶部间距，避免 0 点标签和右侧地点框重叠。",
+          "支持未分配地点事项手动归属到现有地点段；记录页统计区保持为学习时间和工位时间利用率。",
+          "记录汇总导出聚焦学习时间统计，今日时间记录导出会保留无事项的非户外地点段并显示具体时间段。",
+          "修复记录汇总导出在浏览器限制下退成纯文字的问题；优化时间轴顶部间距，避免 0 点标签和右侧地点框重叠。",
           "今日时间记录导出会显示各非户外地点段的具体时间，并把地点描述一起导出；有描述的户外段会随描述保留，但导出时不显示“户外”标题。迁移目标被删除或在后续日期完成后，会记录忽略来源，避免自动同步反复重建。",
           "学习时间统计图改为水杯样式：工位时长为空心水蓝柱，学习时长为水色填充，滚动、刷新和滑动图表会触发杯内水面晃动。",
           "学习填满工位或只有学习无工位时，学习柱显示为固定冰块状态；工位时间利用率改为绿色折线，非假期无工位按 0 连线、假期跳过。",
@@ -6767,14 +6780,96 @@
     });
   }
 
+  function openTransactionGroupsModal() {
+    openModal("编辑事务分组", renderTransactionGroupEditor(), (backdrop) => {
+      backdrop.addEventListener("click", (event) => {
+        const action = event.target.dataset.modalAction;
+        if (action === "add-transaction-group-row") {
+          $("[data-transaction-group-list]", backdrop)?.insertAdjacentHTML("beforeend", renderTransactionGroupRow(""));
+          return;
+        }
+        if (action === "delete-transaction-group-row") {
+          event.target.closest("[data-transaction-group-row]")?.remove();
+          return;
+        }
+        if (action === "move-transaction-group-row") {
+          const row = event.target.closest("[data-transaction-group-row]");
+          const direction = Number(event.target.dataset.direction) || 0;
+          if (!row) return;
+          if (direction < 0 && row.previousElementSibling) row.parentElement.insertBefore(row, row.previousElementSibling);
+          if (direction > 0 && row.nextElementSibling) row.parentElement.insertBefore(row.nextElementSibling, row);
+          return;
+        }
+        if (action !== "save-transaction-groups") return;
+        const rows = $$("[data-transaction-group-row]", backdrop);
+        const nextGroups = rows.map((row) => $("[data-transaction-group-field]", row).value.trim()).filter((group) => group && group !== TRANSACTION_UNCATEGORIZED);
+        const normalizedGroups = normalizeTransactionGroups(nextGroups);
+        const renameMap = new Map();
+        rows.forEach((row) => {
+          const original = row.dataset.originalGroup;
+          const next = $("[data-transaction-group-field]", row).value.trim();
+          if (original && original !== next) renameMap.set(original, next || TRANSACTION_UNCATEGORIZED);
+        });
+        const keptOriginals = new Set(rows.map((row) => row.dataset.originalGroup).filter(Boolean));
+        setState((draft) => {
+          draft.settings.transactionGroups = normalizedGroups;
+          renameTransactionGroups(draft, renameMap, keptOriginals);
+          draft.settings.transactionGroups = normalizeTransactionGroups(draft.settings.transactionGroups);
+        });
+        closeModal();
+      });
+    });
+  }
+
+  function renderTransactionGroupEditor() {
+    const groups = transactionGroupList().filter((group) => group !== TRANSACTION_UNCATEGORIZED);
+    return `
+      <div class="target-tag-editor-list" data-transaction-group-list>
+        ${groups.map(renderTransactionGroupRow).join("")}
+      </div>
+      <div class="target-tag-row fixed-target-tag-row">
+        <span></span>
+        <input value="${TRANSACTION_UNCATEGORIZED}" disabled aria-label="固定分组" />
+        <span class="hint">固定</span>
+      </div>
+      <div class="button-row">
+        <button class="secondary-button" type="button" data-modal-action="add-transaction-group-row">新增分组</button>
+        <button class="primary-button" type="button" data-modal-action="save-transaction-groups">保存分组</button>
+      </div>
+    `;
+  }
+
+  function renderTransactionGroupRow(group) {
+    return `
+      <div class="target-tag-row transaction-group-row" data-transaction-group-row data-original-group="${escapeAttr(group)}">
+        <input data-transaction-group-field value="${escapeAttr(group)}" placeholder="分组名" />
+        <div class="target-tag-row-actions">
+          <div class="move-stack" aria-label="调整分组顺序">
+            <button class="move-button" type="button" data-modal-action="move-transaction-group-row" data-direction="-1" aria-label="上移分组">▲</button>
+            <button class="move-button" type="button" data-modal-action="move-transaction-group-row" data-direction="1" aria-label="下移分组">▼</button>
+          </div>
+          <button class="danger-button" type="button" data-modal-action="delete-transaction-group-row">删除</button>
+        </div>
+      </div>
+    `;
+  }
+
   function openTransactionModal(existingTransaction = null) {
     const currentColor = existingTransaction?.color || colors[0];
+    const currentGroup = existingTransaction ? transactionGroup(existingTransaction) : TRANSACTION_UNCATEGORIZED;
+    const groupOptions = transactionGroupList();
     openModal(
       existingTransaction ? "编辑事务" : "新增事务",
       `
         <label class="form-row">
           <span class="field-label">事务名称</span>
           <input id="transaction-name" value="${escapeAttr(existingTransaction?.name || "")}" placeholder="例如：洗头" />
+        </label>
+        <label class="form-row">
+          <span class="field-label">事务组</span>
+          <select id="transaction-group">
+            ${groupOptions.map((group) => `<option value="${escapeAttr(group)}" ${group === currentGroup ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}
+          </select>
         </label>
         <label class="form-row">
           <span class="field-label">标记颜色</span>
@@ -6796,6 +6891,7 @@
           }
           if (event.target.dataset.modalAction !== "save-transaction") return;
           const name = $("#transaction-name", backdrop).value.trim() || "未命名事务";
+          const group = normalizedTransactionGroupName($("#transaction-group", backdrop)?.value);
           const color = $("#transaction-color", backdrop).value || colors[0];
           setState((draft) => {
             draft.transactions = normalizeTransactions(draft.transactions);
@@ -6803,10 +6899,12 @@
               const item = draft.transactions.find((entry) => entry.id === existingTransaction.id);
               if (!item) return;
               item.name = name;
+              item.group = group;
               item.color = color;
             } else {
-              draft.transactions.push({ id: uid(), name, color, createdAt: dateKey(), records: {} });
+              draft.transactions.push({ id: uid(), name, group, color, createdAt: dateKey(), records: {} });
             }
+            draft.settings.transactionGroups = normalizeTransactionGroups([...(draft.settings.transactionGroups || []), group]);
           });
           closeModal();
         });
@@ -6969,6 +7067,7 @@
     if (action === "move-log") return moveLog(actionNode.closest("[data-log-id]").dataset.logId, Number(actionNode.dataset.direction));
     if (action === "set-target-scope") return setState((draft) => (draft.targetScope = actionNode.dataset.scope));
     if (action === "add-target") return openTargetModal();
+    if (action === "collapse-targets") return collapseTargets();
     if (action === "set-target-filter") return setTargetFilter(actionNode.dataset.tag);
     if (action === "toggle-target-category") return toggleTargetCategory(actionNode.dataset.tag);
     if (action === "edit-target-tags") return openTargetTagsModal();
@@ -6985,6 +7084,8 @@
     if (action === "move-habit") return moveHabit(actionNode.closest("[data-habit-id]").dataset.habitId, Number(actionNode.dataset.direction));
     if (action === "open-habit-calendar") return openHabitCalendar(getHabit(actionNode.closest("[data-habit-id]").dataset.habitId));
     if (action === "add-transaction") return openTransactionModal();
+    if (action === "set-transaction-filter") return setTransactionFilter(actionNode.dataset.group);
+    if (action === "edit-transaction-groups") return openTransactionGroupsModal();
     if (action === "edit-transaction") return openTransactionModal(getTransaction(actionNode.closest("[data-transaction-id]").dataset.transactionId));
     if (action === "move-transaction") return moveTransaction(actionNode.closest("[data-transaction-id]").dataset.transactionId, Number(actionNode.dataset.direction));
     if (action === "open-transaction-calendar") return openTransactionCalendar(getTransaction(actionNode.closest("[data-transaction-id]").dataset.transactionId));
@@ -7680,9 +7781,19 @@
     });
   }
 
+  function collapseTargets() {
+    ui.targetSectionCollapsed = !ui.targetSectionCollapsed;
+    render();
+  }
+
   function setTargetFilter(tag) {
     ui.targetFilterTag = tag || "__all";
     if (tag && tag !== "__all") ui.collapsedTargetTags.delete(tag);
+    render();
+  }
+
+  function setTransactionFilter(group) {
+    ui.transactionFilterGroup = group || "__all";
     render();
   }
 
@@ -9400,6 +9511,48 @@
     }, emptyLocationTotals());
   }
 
+  function normalizedTransactionGroupName(group) {
+    return String(group || "").trim() || TRANSACTION_UNCATEGORIZED;
+  }
+
+  function normalizeTransactionGroups(groups = []) {
+    const unique = [];
+    (Array.isArray(groups) ? groups : [])
+      .map(normalizedTransactionGroupName)
+      .forEach((group) => {
+        if (group !== TRANSACTION_UNCATEGORIZED && !unique.includes(group)) unique.push(group);
+      });
+    return [...unique, TRANSACTION_UNCATEGORIZED];
+  }
+
+  function transactionGroup(transaction) {
+    return normalizedTransactionGroupName(transaction?.group || transaction?.category || transaction?.tag);
+  }
+
+  function transactionGroupList(transactions = transactionList()) {
+    return normalizeTransactionGroups([...(state.settings.transactionGroups || []), ...transactions.map(transactionGroup)]);
+  }
+
+  function transactionCountForGroup(transactions, group) {
+    return (transactions || []).filter((transaction) => transactionGroup(transaction) === group).length;
+  }
+
+  function transactionsForActiveGroup(transactions = transactionList()) {
+    return ui.transactionFilterGroup === "__all" ? [...transactions] : transactions.filter((transaction) => transactionGroup(transaction) === ui.transactionFilterGroup);
+  }
+
+  function renameTransactionGroups(draft, renameMap, keptOriginals) {
+    const nextGroups = new Set(draft.settings.transactionGroups || []);
+    draft.transactions = normalizeTransactions(draft.transactions).map((transaction) => {
+      const original = transactionGroup(transaction);
+      if (renameMap.has(original)) return { ...transaction, group: normalizedTransactionGroupName(renameMap.get(original)) };
+      if (original !== TRANSACTION_UNCATEGORIZED && !keptOriginals.has(original) && !nextGroups.has(original)) return { ...transaction, group: TRANSACTION_UNCATEGORIZED };
+      return transaction;
+    });
+    if (renameMap.has(ui.transactionFilterGroup)) ui.transactionFilterGroup = normalizedTransactionGroupName(renameMap.get(ui.transactionFilterGroup));
+    if (ui.transactionFilterGroup !== "__all" && !nextGroups.has(ui.transactionFilterGroup)) ui.transactionFilterGroup = "__all";
+  }
+
   function normalizeTransactions(transactions = []) {
     if (!Array.isArray(transactions)) return [];
     return transactions
@@ -9414,6 +9567,7 @@
         return {
           id: String(item.id || `transaction-${index + 1}`).trim() || `transaction-${index + 1}`,
           name,
+          group: transactionGroup(item),
           color: String(item.color || colors[index % colors.length] || colors[0]).trim() || colors[0],
           createdAt: normalizeDateKey(item.createdAt) || todayIso(),
           records,
@@ -9439,7 +9593,7 @@
       .sort();
     if (!dates.length) return "还未开始记录";
     const streak = transactionCurrentStreak(transaction, current);
-    return `距上次记录过去了${dateDistanceInDays(dates.at(-1), current)}天${streak >= 2 ? `，连续${streak}天` : ""}`;
+    return `上次记录${dateDistanceInDays(dates.at(-1), current)}天前${streak >= 2 ? `，连续${streak}天` : ""}`;
   }
 
   function transactionCurrentStreak(transaction, currentDate = dateKey()) {
